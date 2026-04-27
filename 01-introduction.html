@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 1: Introduction &amp; Prerequisites</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>1. Introduction &amp; Prerequisites</h1>
+
+<h2>What we are building</h2>
+
+<p>
+We are building <strong>Turtle OS</strong>: a 64-bit operating system for
+x86_64, written entirely in ANSI C (with a handful of inline assembly
+instructions), that boots via UEFI and runs in QEMU. By the end of this
+tutorial you will have:
+</p>
+
+<ul>
+<li>A UEFI boot application that queries the firmware for a graphical
+    framebuffer and a memory map</li>
+<li>A kernel that takes over from UEFI, loads its own GDT, and writes
+    to both a pixel-based console and a serial port</li>
+<li>A build system that produces a FAT disk image you can boot in QEMU
+    with a single <code>make efi-run</code></li>
+</ul>
+
+<p>
+No GRUB, no Multiboot2, no gnu-efi. Just your code and the firmware.
+</p>
+
+<h2>Why UEFI?</h2>
+
+<p>
+If you have read older OS dev tutorials, they probably used the legacy
+BIOS interface: real-mode assembly, int 0x10 for video, int 0x13 for
+disk reads, switching to protected mode, then to long mode. That approach
+has three problems in 2025:
+</p>
+
+<ol>
+<li>BIOS is deprecated. New machines ship with UEFI firmware only.</li>
+<li>The 16-bit real-mode&ndash;to&ndash;64-bit long-mode transition is
+    enormously fiddly (CR0, CR4, EFER MSR, page tables, GDT, IDT&hellip;)
+    and you have to do it all in assembly before writing a single line
+    of C.</li>
+<li>UEFI firmware starts your code in 64-bit long mode with identity-mapped
+    memory and a working stack. You can write <em>real C</em> from the
+    very first instruction.</li>
+</ol>
+
+<p>
+The trade-off is that UEFI uses the <strong>Microsoft x64 calling
+convention</strong> (rcx, rdx, r8, r9 for the first four arguments), not
+the System V AMD64 convention (rdi, rsi, rdx, rcx) that GCC and Linux
+use by default. We will handle this with a single <code>__attribute__((ms_abi))</code>
+annotation &mdash; no assembly shim required for most functions.
+</p>
+
+<h2>Why not gnu-efi?</h2>
+
+<p>
+The gnu-efi library provides EFI type definitions and a tiny startup
+file (<code>crt0-efi-x86_64.o</code>). We use the startup file (it
+contains the PE entry point that the UEFI loader jumps to), but we
+<strong>write our own type definitions</strong> instead of including
+gnu-efi's headers. The reason: gnu-efi's self-relocator
+(<code>reloc_x86_64.o</code>, linked in via <code>libgnuefi.a</code>)
+walks the <code>.rela</code> section at runtime and patches up absolute
+addresses. In larger binaries, we observed it corrupting function
+pointers. By defining our own types, we control every byte of what gets
+linked, and we avoid the relocator entirely for our own code.
+</p>
+
+<blockquote class="tip">
+We do still link <code>/usr/lib/crt0-efi-x86_64.o</code> and
+<code>/usr/lib/libgnuefi.a</code> (which contains only
+<code>reloc_x86_64.o</code>). The relocator is needed because the UEFI
+PE loader does not process <code>.rela</code> relocations; it only
+processes the <code>.reloc</code> section. The gnu-efi relocator
+handles the <code>.rela</code> patching at runtime. Our own code is
+compiled <code>-fpic -shared</code> so it uses only GOT-relative
+references, which need no relocation.
+</blockquote>
+
+<h2>Prerequisites</h2>
+
+<h3>Software</h3>
+
+<table>
+<tr><th>Tool</th><th>Package (Arch Linux)</th><th>Why</th></tr>
+<tr><td>GCC</td><td><code>gcc</code></td><td>C compiler (must target x86_64)</td></tr>
+<tr><td>GNU ld (binutils)</td><td><code>binutils</code></td><td>Linker for ELF and PE conversions</td></tr>
+<tr><td>objcopy</td><td><code>binutils</code></td><td>Convert ELF to PE, embed font as object</td></tr>
+<tr><td>NASM</td><td><code>nasm</code></td><td>Assembler (for legacy entry, optional)</td></tr>
+<tr><td>QEMU</td><td><code>qemu-system-x86</code></td><td>Emulator for testing</td></tr>
+<tr><td>OVMF</td><td><code>edk2-ovmf</code></td><td>Open-source UEFI firmware for QEMU</td></tr>
+<tr><td>mtools</td><td><code>mtools</code></td><td>Create FAT filesystem images</td></tr>
+<tr><td>gnu-efi</td><td><code>gnu-efi</code></td><td>Startup object and relocator</td></tr>
+</table>
+
+<p>On Arch Linux, install everything at once:</p>
+
+<pre><code>sudo pacman -S gcc binutils nasm qemu-system-x86 edk2-ovmf mtools gnu-efi</code></pre>
+
+<h3>Knowledge</h3>
+
+<ul>
+<li><strong>ANSI C</strong> &mdash; pointers, structs, bitwise operators, the preprocessor.
+    We use C11 features (<code>__attribute__</code>, designated initializers)
+    but nothing exotic.</li>
+<li><strong>x86 assembly basics</strong> &mdash; you should know what registers are,
+    what <code>mov</code>, <code>push</code>, <code>call</code>, and <code>ret</code>
+    do. You do <em>not</em> need to know 64-bit specifics; we explain those.</li>
+<li><strong>Basic Unix command line</strong> &mdash; running <code>make</code>, reading error messages.</li>
+</ul>
+
+<h2>Project layout</h2>
+
+<pre><code>turtle/
+├── Makefile
+├── efi_linker.ld          # EFI linker script
+├── linker.ld              # Legacy GRUB linker script (not used for UEFI)
+├── include/
+│   ├── arch/
+│   │   └── gdt.h          # GDT and TSS structures
+│   ├── boot/
+│   │   └── efi.h          # Our own EFI type definitions
+│   └── kernel/
+│       ├── types.h        # Freestanding integer types
+│       ├── kernel.h       # boot_info struct, kernel_main declaration
+│       ├── framebuffer.h  # Framebuffer info struct and API
+│       ├── printk.h       # printk declaration
+│       └── string.h       # Freestanding string function declarations
+├── src/
+│   ├── boot/
+│   │   ├── efi_main.c     # UEFI entry point (the main event)
+│   │   └── entry.c        # SYSV→MS ABI bridge
+│   ├── kernel/
+│   │   ├── main.c         # kernel_main: serial output, fb init, printk
+│   │   ├── printk.c       # printf for the kernel (uses fb_putc)
+│   │   ├── string.c       # memset, memcpy, strlen, etc.
+│   │   └── panic.c        # Kernel panic handler
+│   ├── arch/x86_64/
+│   │   ├── gdt.c          # GDT initialization and loading
+│   │   └── entry.asm      # Legacy NASM entry (not used for UEFI)
+│   └── drivers/
+│       ├── fb.c           # Framebuffer console driver
+│       └── font.bin       # 8x16 PC screen font (4096 bytes)
+└── scripts/
+    ├── build-pcc.sh       # Script to build the PCC compiler
+    └── run.sh             # QEMU launch helper</code></pre>
+
+<p>
+The two most important files are <code>src/boot/efi_main.c</code> (the
+UEFI entry point that does all the firmware negotiation) and
+<code>include/boot/efi.h</code> (our own EFI type definitions). The
+kernel side &mdash; <code>main.c</code>, <code>gdt.c</code>,
+<code>fb.c</code>, <code>printk.c</code> &mdash; is what runs after we
+have exited UEFI boot services and are on our own.
+</p>
+
+<h2>A note on freestanding C</h2>
+
+<p>
+We compile every file with <code>-ffreestanding -nostdlib -nostdinc</code>.
+This means:
+</p>
+
+<ul>
+<li>No <code>stdio.h</code>, no <code>stdlib.h</code>, no <code>string.h</code>
+    from the C library</li>
+<li>No <code>main()</code> signature enforced by the compiler &mdash; our
+    entry point is <code>efi_main</code>, called by UEFI firmware</li>
+<li>We must provide our own <code>memset</code>, <code>memcpy</code>,
+    <code>strlen</code>, etc.</li>
+<li>We use <code>__builtin_va_list</code> for variadic arguments in
+    <code>printk</code> &mdash; this is a GCC builtin, not a library
+    function</li>
+</ul>
+
+<p>
+We also use compiler-specific attributes:
+</p>
+
+<ul>
+<li><code>__attribute__((ms_abi))</code> &mdash; makes a function use the
+    Windows x64 calling convention (required for all EFI callbacks)</li>
+<li><code>__attribute__((packed))</code> &mdash; removes padding from
+    structs that must match hardware/firmware layouts</li>
+</ul>
+
+<div class="nav">
+<a href="index.html">Table of Contents</a>
+<a href="02-efi-types.html">Next: UEFI &amp; EFI Types →</a>
+</div>
+
+</body>
+</html>

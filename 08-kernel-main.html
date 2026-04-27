@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 8: Kernel Main &amp; Serial I/O</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>8. Kernel Main &amp; Serial I/O</h1>
+
+<p>
+After ExitBootServices and the GDT load, we're in bare-metal 64-bit
+long mode with our own segment descriptors. Now we call
+<code>kernel_main()</code> &mdash; the first "real" kernel function.
+But there's a catch: the UEFI console is gone, so we need our own
+output mechanism. That's where the serial port comes in.
+</p>
+
+<h2>The serial port: COM1 at I/O port 0x3F8</h2>
+
+<p>
+The PC's first serial port (COM1) lives at I/O port address
+<code>0x3F8</code>. In 64-bit long mode, we access I/O ports using
+the <code>outb</code> and <code>inb</code> instructions:
+</p>
+
+<ul>
+<li><code>outb data, port</code> &mdash; write a byte to an I/O port</li>
+<li><code>inb port, reg</code> &mdash; read a byte from an I/O port</li>
+</ul>
+
+<p>
+In GCC inline assembly:
+</p>
+
+<pre><code>static void serial_out(char c)
+{
+    __asm__ volatile("outb %0, %1"
+                     : : "a"(c), "Nd"((uint16_t)0x3F8));
+}</code></pre>
+
+<p>
+The constraint <code>"a"</code> puts the character in AL (low byte of
+RAX). The constraint <code>"Nd"</code> puts the port number in a
+register or as an immediate (the <code>N</code> modifier means "0..255
+immediate", and <code>d</code> means "any general register"). Since
+0x3F8 fits in 16 bits, the assembler can use the shorter
+<code>outb %al, $0x3F8</code> encoding.
+</p>
+
+<h2>Why not memory-mapped I/O?</h2>
+
+<p>
+You might be tempted to write to the UART's memory-mapped address:
+</p>
+
+<pre><code>volatile uint8_t *com1 = (volatile uint8_t *)0x3F8;
+com1[0] = 'H';  /* WRONG after EBS! */</code></pre>
+
+<blockquote class="warning">
+<strong>This causes a page fault after ExitBootServices.</strong>
+UEFI's page tables map the UART's MMIO address during boot services,
+but after EBS, those mappings may no longer be present (or the
+firmware may have used a different virtual address). Address 0x3F8 as a
+<strong>memory address</strong> is not the same as I/O port 0x3F8. The
+I/O port space is separate and accessed via <code>in</code>/<code>out</code>
+instructions, not memory reads/writes.
+</blockquote>
+
+<h2>Why the delay loop?</h2>
+
+<pre><code>static void serial_puts(const char *s)
+{
+    while (*s) {
+        serial_out(*s++);
+        for (volatile int i = 0; i &lt; 400; i++)
+            ;
+    }
+}</code></pre>
+
+<p>
+In real hardware, you should check the UART's Line Status Register
+(bit 5 = Transmitter Holding Register Empty) before sending each byte:
+</p>
+
+<pre><code>/* Correct approach for real hardware: */
+while (!(inb(0x3FD) &amp; 0x20))  /* wait for THR empty */
+    ;
+outb(c, 0x3F8);</code></pre>
+
+<p>
+However, in QEMU, the emulated UART's THR-empty bit never becomes set
+(at least not in a timely manner), so polling loops hang forever. The
+delay loop is a pragmatic workaround: we burn a few hundred CPU cycles
+between characters, which is enough for QEMU's emulated UART to
+process each byte.
+</p>
+
+<blockquote class="tip">
+For production, you'd implement proper UART initialization (set baud
+rate, enable FIFOs, configure interrupts) and check the LSR. The delay
+loop is a development convenience.
+</blockquote>
+
+<h2>kernel_main</h2>
+
+<pre><code>void kernel_main(struct boot_info *info)
+{
+    serial_puts("Turtle OS kernel_main reached!\n");
+
+    if (info &amp;&amp; info-&gt;fb.base_addr) {
+        fb_init(&amp;info-&gt;fb);
+        printk("Turtle OS v0.1\n");
+        printk("64-bit POSIX-compatible kernel\n\n");
+        printk("Framebuffer: %dx%d %d bpp\n",
+               info-&gt;fb.width, info-&gt;fb.height, info-&gt;fb.bpp);
+        printk("Total memory: %lu MB\n",
+               info-&gt;total_memory / (1024 * 1024));
+    }
+
+    serial_puts("Kernel initialized.\n");
+
+    for (;;)
+        __asm__ volatile("cli; hlt");
+}</code></pre>
+
+<p>
+The function does three things:
+</p>
+
+<ol>
+<li><strong>Serial output</strong> &mdash; <code>serial_puts</code>
+    confirms we reached kernel_main. This is our most reliable debug
+    channel: it works even without a framebuffer.</li>
+<li><strong>Framebuffer initialization</strong> &mdash;
+    <code>fb_init</code> sets up the graphical console (Chapter 9),
+    and <code>printk</code> prints formatted text to it.</li>
+<li><strong>Halt loop</strong> &mdash; <code>cli; hlt</code>
+    disables interrupts and halts the CPU. If an NMI arrives, the
+    <code>for(;;)</code> loop re-halts. This is the idle loop: the
+    kernel just sits here until we implement scheduling.</li>
+</ol>
+
+<h2>Why two output channels?</h2>
+
+<p>
+Having both serial and framebuffer output is extremely useful:
+</p>
+
+<ul>
+<li><strong>Serial</strong> works from the very first instruction after
+    EBS. It's simple, reliable, and you can capture it to a file with
+    QEMU's <code>-serial stdio</code> or <code>-serial file:log.txt</code>.</li>
+<li><strong>Framebuffer</strong> shows text on the QEMU window. It's
+    what a user would see on a real machine. But it requires the GOP
+    information, font data, and a working <code>fb_init</code>.</li>
+</ul>
+
+<p>
+If the framebuffer fails, serial still works. If QEMU's serial output
+is misconfigured, the screen still works. Redundancy is your friend
+when debugging boot code.
+</p>
+
+<div class="nav">
+<a href="07-gdt.html">&larr; 7. The GDT in 64-bit Mode</a>
+<a href="09-framebuffer.html">9. The Framebuffer Console &rarr;</a>
+</div>
+
+</body>
+</html>

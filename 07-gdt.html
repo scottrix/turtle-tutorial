@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 7: The GDT in 64-bit Long Mode</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>7. The GDT in 64-bit Long Mode</h1>
+
+<p>
+After exiting UEFI boot services, the firmware's GDT is still loaded.
+We need our own so we can control segment selectors and set up a TSS
+(Task State Segment) for future interrupt handling. This chapter
+explains how the GDT works in 64-bit long mode and why the entries are
+different from 32-bit protected mode.
+</p>
+
+<h2>What is the GDT?</h2>
+
+<p>
+The Global Descriptor Table (GDT) is a data structure that the CPU uses
+to translate <strong>segment selectors</strong> (values in segment
+registers like CS, DS, SS) into segment descriptors. Each descriptor
+defines a memory segment's base address, limit, access rights, and
+granularity.
+</p>
+
+<p>
+In 32-bit protected mode, the GDT matters a lot: segments can have
+different base addresses and limits, and the CPU enforces access
+rights. In 64-bit long mode, most of this is ignored:
+</p>
+
+<ul>
+<li><strong>Base address is always 0</strong> &mdash; CS, DS, ES, SS
+    all start at address 0 in long mode. The hardware ignores the base
+    field.</li>
+<li><strong>Limit is ignored</strong> &mdash; all segments cover the
+    entire 64-bit address space.</li>
+<li><strong>Access rights still matter</strong> &mdash; the CPU checks
+    whether a segment is present, readable/writable, and whether it's
+    code or data. A wrong access byte will cause a general protection
+    fault.</li>
+<li><strong>The L bit matters</strong> &mdash; this is the 64-bit
+    flag. Setting L=1 and D=0 in a code descriptor means "this is a
+    64-bit code segment".</li>
+</ul>
+
+<p>
+So why do we still need a GDT? Two reasons:
+</p>
+
+<ol>
+<li>The CPU <strong>requires</strong> valid descriptors in CS and SS.
+    If we load a null descriptor into CS, we triple-fault immediately.</li>
+<li>We need a <strong>TSS descriptor</strong> for the Task State
+    Segment. The TSS holds stack pointers for privilege level changes
+    (e.g., when an interrupt fires while running in user mode, the CPU
+    switches to the kernel stack defined in the TSS).</li>
+</ol>
+
+<h2>GDT entry layout</h2>
+
+<p>
+Each GDT entry is 8 bytes (64 bits). In 64-bit mode, a TSS descriptor
+takes <strong>16 bytes</strong> (two entries). Here's the bit layout
+of a standard 8-byte descriptor:
+</p>
+
+<pre><code> 31..24  | 23..22 | 21 | 20..19 | 15..14 | 13 | 12..8 | 7..0
+---------|--------|----|--------|--------|----|-------|------
+Base[31:24] | G | D/L |  AVL  | Limit[19:16] | P | DPL | S | Type
+            |   |     |       |              |   |     |   |
+            |   |     |       |              |   |     |   +-- 4 bits
+            |   |     |       |              |   +-----+------ 4 bits
+            |   |     |       |              +-------------------- 1 bit
+            |   |     |       +----------------------------------- 4 bits
+            |   |     +------------------------------------------- 1 bit
+            |   +------------------------------------------------- 1 bit
+            +----------------------------------------------------- 1 bit
+
+Low 32 bits:
+ 31..16        | 15..0
+---------------|-------
+Base[23:16]    | Limit[15:0]</code></pre>
+
+<h2>The 64-bit code descriptor</h2>
+
+<p>
+For a 64-bit code segment (the one CS must point to), the key fields
+are:
+</p>
+
+<table>
+<tr><th>Field</th><th>Value</th><th>Why</th></tr>
+<tr><td>Type</td><td>0xA (Execute/Read)</td><td>Code segments must be executable</td></tr>
+<tr><td>S</td><td>1</td><td>Code/data descriptor (not a system segment)</td></tr>
+<tr><td>DPL</td><td>0 (ring 0) for kernel, 3 for user</td><td>Privilege level</td></tr>
+<tr><td>P</td><td>1</td><td>Segment is present</td></tr>
+<tr><td>L</td><td>1</td><td><strong>64-bit mode</strong></td></tr>
+<tr><td>D</td><td>0</td><td>Must be 0 when L=1 (CPU requirement)</td></tr>
+<tr><td>G</td><td>1</td><td>Granularity: limit is in 4K pages</td></tr>
+</table>
+
+<p>
+The access byte for a kernel 64-bit code segment is:
+</p>
+
+<pre><code>P DPL S Type
+1 00  1 1010  = 0x9A</code></pre>
+
+<p>
+The granularity byte:
+</p>
+
+<pre><code>G D  L  AVL Limit[19:16]
+1 0  1  0    1111         = 0xAF</code></pre>
+
+<blockquote class="warning">
+<strong>The L bit (0x20 in the granularity byte) is what makes this a
+64-bit descriptor.</strong> Without it, the CPU treats the code segment
+as 32-bit and everything goes wrong. The granularity byte must be
+<code>0xAF</code>, not <code>0x4F</code> (which would be a 32-bit
+code segment with L=0).
+</blockquote>
+
+<h2>The data descriptor</h2>
+
+<p>
+Data segments are simpler. In 64-bit long mode, the CPU ignores the
+base and limit for data segments, but we still need valid descriptors
+in DS, ES, FS, GS, and SS:
+</p>
+
+<pre><code>Access:     1 00 1 0010 = 0x92  (Read/Write data, ring 0)
+Granularity: 1 1 0 0 1111 = 0xCF  (G=1, D/B=1, L=0, limit=0xFFFFF)</code></pre>
+
+<p>
+For the data segment, <code>D/B=1</code> (the "B" bit for data
+segments) and <code>L=0</code> (64-bit code segments use L; data
+segments don't have an L bit).
+</p>
+
+<blockquote class="warning">
+<strong>We originally used 0xA for code granularity and 0xC for data
+granularity.</strong> These set G=1 and Limit=0xF but had wrong L/D
+bits. The code descriptor had L=0 (32-bit!), causing a triple fault on
+<code>lretq</code>. The correct values are <strong>0xAF</strong> for
+64-bit code and <strong>0xCF</strong> for data. This is the kind of bug
+that gives OS development its reputation.
+</blockquote>
+
+<h2>Our GDT layout</h2>
+
+<pre><code>Index | Selector | Description
+------+----------+------------------------------------------
+  0   |   0x00   | Null descriptor (required by CPU)
+  1   |   0x08   | 64-bit kernel code (ring 0)
+  2   |   0x10   | Kernel data (ring 0)
+  3   |   0x18   | 64-bit user code (ring 3)
+  4   |   0x20   | User data (ring 3)
+  5-6 |   0x28   | TSS descriptor (16 bytes, two entries)</code></pre>
+
+<p>
+Selectors are index &times; 8 (since each entry is 8 bytes). The TSS
+at index 5 uses selector <code>0x28</code>.
+</p>
+
+<h2>The TSS in 64-bit mode</h2>
+
+<p>
+The 64-bit TSS structure is different from the 32-bit one. It has
+three stack pointers (RSP0, RSP1, RSP2) for privilege-level changes,
+seven IST (Interrupt Stack Table) pointers, and an I/O bitmap offset:
+</p>
+
+<pre><code>struct tss_entry {
+    uint32_t reserved0;
+    uint64_t rsp[3];     /* RSP0, RSP1, RSP2 */
+    uint64_t reserved1;
+    uint64_t ist[7];     /* IST1..IST7 */
+    uint64_t reserved2;
+    uint16_t reserved3;
+    uint16_t iomap_base;
+} __attribute__((packed));</code></pre>
+
+<p>
+<code>RSP0</code> is the most important field: when the CPU receives
+an interrupt while running at ring 3, it switches to <code>RSP0</code>
+before calling the interrupt handler. We'll set this to our kernel
+stack address when we implement interrupt handling.
+</p>
+
+<p>
+<code>iomap_base</code> must be set to <code>sizeof(struct tss_entry)</code>
+(104) to indicate "no I/O bitmap" (any value &ge; 104 disables the
+I/O permission bitmap).
+</p>
+
+<h2>Setting up the TSS descriptor</h2>
+
+<p>
+In 64-bit mode, a TSS descriptor is 16 bytes (two GDT entries). The
+lower 8 bytes look like a standard descriptor with type=0x89 (64-bit
+TSS, busy=0). The upper 8 bytes contain the upper 32 bits of the TSS
+base address:
+</p>
+
+<pre><code>static void tss_set_descriptor(int idx, uint64_t base, uint64_t limit)
+{
+    uint32_t base_low  = (uint32_t)(base &amp; 0xFFFFFFFF);
+    uint32_t base_high = (uint32_t)(base &gt;&gt; 32);
+
+    gdt[idx].limit_low   = (uint16_t)(limit &amp; 0xFFFF);
+    gdt[idx].base_low    = (uint16_t)(base_low &amp; 0xFFFF);
+    gdt[idx].base_mid    = (uint8_t)((base_low &gt;&gt; 16) &amp; 0xFF);
+    gdt[idx].access      = 0x89;   /* 64-bit TSS, present */
+    gdt[idx].granularity = 0x00;
+    gdt[idx].base_high   = (uint8_t)((base_low &gt;&gt; 24) &amp; 0xFF);
+
+    gdt[idx + 1].limit_low = (uint16_t)(base_high &amp; 0xFFFF);
+    /* remaining bytes zero */
+}</code></pre>
+
+<h2>Initializing the GDT</h2>
+
+<pre><code>void gdt_init(void)
+{
+    memset(&amp;tss, 0, sizeof(struct tss_entry));
+    tss.rsp[0] = 0;                        /* set later with kernel stack */
+    tss.iomap_base = sizeof(struct tss_entry);
+
+    gdt_set_entry(0, 0, 0, 0, 0);                      /* null */
+    gdt_set_entry(1, 0, 0xFFFFF, 0x9A, 0xAF);          /* kernel code */
+    gdt_set_entry(2, 0, 0xFFFFF, 0x92, 0xCF);          /* kernel data */
+    gdt_set_entry(3, 0, 0xFFFFF, 0xFA, 0xAF);          /* user code */
+    gdt_set_entry(4, 0, 0xFFFFF, 0xF2, 0xCF);          /* user data */
+    tss_set_descriptor(5, (uint64_t)&amp;tss,
+                       sizeof(struct tss_entry) - 1);
+
+    gdt_pointer.limit = sizeof(gdt) - 1;
+    gdt_pointer.base  = (uint64_t)&amp;gdt;
+}</code></pre>
+
+<h2>Loading the GDT</h2>
+
+<p>
+This is the most delicate operation. We need to:
+</p>
+
+<ol>
+<li>Load the new GDT with <code>lgdt</code></li>
+<li>Reload all data segment registers with our new data selector
+    (<code>0x10</code>)</li>
+<li>Far-jump to our new code selector (<code>0x08</code>) using
+    <code>lretq</code></li>
+<li>Load the task register with our TSS selector
+    (<code>0x28</code>)</li>
+</ol>
+
+<pre><code>void gdt_load(void)
+{
+    __asm__ volatile (
+        "lgdt %0\n\t"           /* load new GDT */
+        "mov $0x10, %%ax\n\t"   /* 0x10 = our data selector */
+        "mov %%ax, %%ds\n\t"
+        "mov %%ax, %%es\n\t"
+        "mov %%ax, %%fs\n\t"
+        "mov %%ax, %%gs\n\t"
+        "mov %%ax, %%ss\n\t"
+        "push $0x08\n\t"        /* 0x08 = our code selector */
+        "lea 1f(%%rip), %%rax\n\t"  /* address after lretq */
+        "push %%rax\n\t"
+        "lretq\n\t"             /* far return: reloads CS */
+        "1:\n\t"
+        "mov $0x28, %%ax\n\t"   /* 0x28 = TSS selector */
+        "ltr %%ax\n\t"
+        :
+        : "m" (gdt_pointer)
+        : "rax"
+    );
+}</code></pre>
+
+<p>
+The <code>lretq</code> trick: we push the new CS selector and the
+address of the next instruction onto the stack, then do a far return.
+This atomically reloads CS and continues execution. It's equivalent to
+a far jump (<code>ljmp</code>), but <code>ljmp</code> with a literal
+address is tricky in 64-bit position-independent code. The
+<code>lea 1f(%rip)</code> computes the address relative to the current
+instruction pointer, which works regardless of where the kernel is
+loaded.
+</p>
+
+<blockquote class="warning">
+<strong>The clobber list must use <code>"rax"</code>, not
+<code>"ax"</code>.</strong> In 64-bit mode, the register is RAX. Some
+compilers (like PCC) only accept the full-size name. GCC accepts both,
+but <code>"rax"</code> is more portable.
+</blockquote>
+
+<div class="nav">
+<a href="06-memory-ebs.html">&larr; 6. Memory Map &amp; ExitBootServices</a>
+<a href="08-kernel-main.html">8. Kernel Main &amp; Serial I/O &rarr;</a>
+</div>
+
+</body>
+</html>

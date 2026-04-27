@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 6: Memory Map &amp; ExitBootServices</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>6. Memory Map &amp; ExitBootServices</h1>
+
+<p>
+The final step before we can take over the machine is to read the memory
+map and exit boot services. This is the trickiest part of the entire
+boot process because of a subtle requirement: the memory map must be
+<strong>fresh</strong> at the moment we call ExitBootServices.
+</p>
+
+<h2>Getting the memory map</h2>
+
+<p>
+<code>GetMemoryMap</code> returns an array of
+<code>EFI_MEMORY_DESCRIPTOR</code> structures. The first call is a
+probe: we pass <code>NULL</code> for the buffer and the firmware tells
+us how big the buffer needs to be:
+</p>
+
+<pre><code>EFI_MEMORY_DESCRIPTOR *memory_map = NULL;
+UINTN map_size = 0, map_key = 0, desc_size = 0;
+UINT32 desc_ver = 0;
+
+status = g_BS-&gt;GetMemoryMap(&amp;map_size, memory_map, &amp;map_key,
+                              &amp;desc_size, &amp;desc_ver);
+if (status == EFI_BUFFER_TOO_SMALL ||
+    status == EFI_INVALID_PARAMETER) {
+    map_size += 4096 * 8;
+    status = g_BS-&gt;AllocatePool(EfiLoaderData, map_size,
+                                  (void **)&amp;memory_map);
+    if (EFI_ERROR(status))
+        return status;
+    status = g_BS-&gt;GetMemoryMap(&amp;map_size, memory_map, &amp;map_key,
+                                  &amp;desc_size, &amp;desc_ver);
+}</code></pre>
+
+<p>
+We add extra space (<code>4096 * 8</code>) because the map may grow
+between the probe and the real call. We allocate with
+<code>AllocatePool</code> (a boot service) and then call
+<code>GetMemoryMap</code> again with the real buffer.
+</p>
+
+<blockquote class="tip">
+<code>GetMemoryMap</code> returns <code>EFI_BUFFER_TOO_SMALL</code> on
+the first call (with <code>map_size=0</code>), but some implementations
+return <code>EFI_INVALID_PARAMETER</code> instead. We check for both.
+</blockquote>
+
+<h2>Computing total conventional memory</h2>
+
+<pre><code>uint64_t total_mem = 0;
+UINTN entries = map_size / desc_size;
+for (UINTN i = 0; i &lt; entries; i++) {
+    EFI_MEMORY_DESCRIPTOR *desc =
+        (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)memory_map + i * desc_size);
+    if (desc-&gt;Type == EfiConventionalMemory ||
+        desc-&gt;Type == EfiLoaderCode ||
+        desc-&gt;Type == EfiBootServicesCode ||
+        desc-&gt;Type == EfiBootServicesData) {
+        total_mem += desc-&gt;NumberOfPages * 4096;
+    }
+}</code></pre>
+
+<p>
+Key detail: descriptors are not necessarily <code>sizeof(EFI_MEMORY_DESCRIPTOR)</code>
+apart. The <code>desc_size</code> value returned by
+<code>GetMemoryMap</code> may be larger (future versions of the spec may
+add fields). We always use <code>desc_size</code> to step through the
+array.
+</p>
+
+<h2>The map-key trap</h2>
+
+<p>
+This is the single most important thing to understand about
+ExitBootServices:
+</p>
+
+<blockquote class="warning">
+<strong>Any boot service call between GetMemoryMap and ExitBootServices
+invalidates the map key.</strong> If you call
+<code>ExitBootServices</code> with a stale key, it returns
+<code>EFI_INVALID_PARAMETER</code> and you cannot exit boot services.
+</blockquote>
+
+<p>
+This means you cannot:
+</p>
+
+<ul>
+<li>Call <code>print()</code> (which calls
+    <code>ConOut-&gt;OutputString</code>) between GetMemoryMap and EBS</li>
+<li>Call <code>AllocatePool</code> between GetMemoryMap and EBS</li>
+<li>Call <em>any</em> boot service function between them</li>
+</ul>
+
+<p>
+Our solution: allocate a fresh buffer <strong>before</strong> the final
+<code>GetMemoryMap</code>, call <code>GetMemoryMap</code>, then
+immediately call <code>ExitBootServices</code> with no intervening
+boot service calls:
+</p>
+
+<pre><code>UINTN ebs_map_size = 4096 * 64;
+UINTN ebs_map_key = 0;
+EFI_MEMORY_DESCRIPTOR *ebs_mmap = NULL;
+
+status = g_BS-&gt;AllocatePool(EfiLoaderData, ebs_map_size,
+                              (void **)&amp;ebs_mmap);
+if (EFI_ERROR(status)) return status;
+
+/* This is the LAST GetMemoryMap before EBS. No boot service
+   calls are allowed between this and ExitBootServices. */
+status = g_BS-&gt;GetMemoryMap(&amp;ebs_map_size, ebs_mmap,
+                              &amp;ebs_map_key, &amp;ebs_desc_size,
+                              &amp;ebs_desc_ver);
+if (EFI_ERROR(status)) return status;
+
+status = g_BS-&gt;ExitBootServices(ImageHandle, ebs_map_key);
+if (EFI_ERROR(status)) return status;</code></pre>
+
+<p>
+We use a separate buffer (<code>ebs_mmap</code>) so we can keep the
+original <code>memory_map</code> for the kernel's own use (passing it
+in <code>boot_info</code>).
+</p>
+
+<h2>What happens after ExitBootServices</h2>
+
+<p>
+Once <code>ExitBootServices</code> returns <code>EFI_SUCCESS</code>:
+</p>
+
+<ul>
+<li><strong>Interrupts are still enabled</strong> &mdash; we must
+    disable them ourselves with <code>cli</code></li>
+<li><strong>Boot services are gone</strong> &mdash; any call to
+    <code>g_BS</code> will crash</li>
+<li><strong>The UEFI console is gone</strong> &mdash; we must use
+    our own output (serial port or framebuffer)</li>
+<li><strong>Memory allocations are frozen</strong> &mdash; we own
+    whatever we allocated; the firmware won't free or reclaim it</li>
+<li><strong>IDTR still points to UEFI's IDT</strong> &mdash; if an
+    interrupt fires, it will jump to firmware code that may not be
+    there anymore. This is why we <code>cli</code> immediately.</li>
+</ul>
+
+<pre><code>__asm__ volatile("cli");</code></pre>
+
+<p>
+From this point on, we are in bare-metal mode. The next steps are to
+set up our own GDT (Chapter 7) and start the kernel (Chapter 8).
+</p>
+
+<h2>Finding the RSDP</h2>
+
+<p>
+Before we exit boot services, we also look for the ACPI RSDP (Root
+System Description Pointer). This is needed later for hardware
+enumeration (finding PCI devices, HPET, APIC, etc.). We search the
+UEFI configuration table for the ACPI 2.0 GUID:
+</p>
+
+<pre><code>uint64_t rsdp = 0;
+EFI_GUID acpi_20_guid = ACPI_20_TABLE_GUID;
+for (UINTN i = 0; i &lt; g_ST-&gt;NumberOfTableEntries; i++) {
+    if (guid_match(&amp;g_ST-&gt;ConfigurationTable[i].VendorGuid,
+                   &amp;acpi_20_guid)) {
+        rsdp = (uint64_t)g_ST-&gt;ConfigurationTable[i].VendorTable;
+        break;
+    }
+}</code></pre>
+
+<p>
+We store this in <code>boot_info.rsdp_addr</code> for future use.
+</p>
+
+<div class="nav">
+<a href="05-gop.html">&larr; 5. The Graphics Output Protocol</a>
+<a href="07-gdt.html">7. The GDT in 64-bit Mode &rarr;</a>
+</div>
+
+</body>
+</html>

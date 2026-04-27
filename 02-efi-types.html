@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 2: UEFI Fundamentals &amp; EFI Type Definitions</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>2. UEFI Fundamentals &amp; EFI Type Definitions</h1>
+
+<h2>What is UEFI?</h2>
+
+<p>
+UEFI (Unified Extensible Firmware Interface) is the replacement for the
+legacy PC BIOS. When you power on a modern x86_64 machine, the UEFI
+firmware:
+</p>
+
+<ol>
+<li>Initializes hardware (RAM, PCI, USB, etc.)</li>
+<li>Sets up 64-bit long mode with identity-mapped memory</li>
+<li>Finds a FAT32 partition on a disk (the EFI System Partition)</li>
+<li>Looks for a file at <code>\EFI\BOOT\BOOTX64.EFI</code></li>
+<li>Loads it as a PE+ executable and jumps to its entry point</li>
+</ol>
+
+<p>
+That's it. Your code starts executing in 64-bit long mode, with a
+stack, with memory mapped 1:1 (virtual address = physical address), and
+with a set of <strong>boot services</strong> you can call to do things
+like allocate memory, find protocols (UEFI's word for device drivers),
+and draw to the screen.
+</p>
+
+<h2>The UEFI calling convention</h2>
+
+<p>
+UEFI uses the <strong>Microsoft x64 calling convention</strong> (also
+called <code>__ms_abi</code> in GCC). This is different from the
+System V AMD64 ABI used by Linux, macOS, and most Unix systems:
+</p>
+
+<table>
+<tr><th></th><th>System V AMD64 (Linux)</th><th>Microsoft x64 (UEFI)</th></tr>
+<tr><td>1st arg</td><td>rdi</td><td>rcx</td></tr>
+<tr><td>2nd arg</td><td>rsi</td><td>rdx</td></tr>
+<tr><td>3rd arg</td><td>rdx</td><td>r8</td></tr>
+<tr><td>4th arg</td><td>rcx</td><td>r9</td></tr>
+<tr><td>5th+ args</td><td>stack</td><td>stack</td></tr>
+<tr><td>Return val</td><td>rax</td><td>rax</td></tr>
+<tr><td>Caller-saved</td><td>rax,rcx,rdx,rsi,rdi,r8-r11</td><td>rax,rcx,rdx,r8-r11</td></tr>
+<tr><td>Callee-saved</td><td>rbx,rbp,r12-r15</td><td>rbx,rbp,rdi,rsi,r12-r15</td></tr>
+<tr><td>Shadow space</td><td>none</td><td>32 bytes on stack</td></tr>
+</table>
+
+<p>
+The critical difference: <strong>every function that UEFI calls, or that
+calls a UEFI function, must use the MS ABI</strong>. GCC provides
+<code>__attribute__((ms_abi))</code> for exactly this purpose. We define
+a macro for it:
+</p>
+
+<pre><code>#define EFIAPI __attribute__((ms_abi))</code></pre>
+
+<blockquote class="warning">
+The <code>EFIAPI</code> macro <strong>must appear at the top of efi.h</strong>,
+before it is used in any typedef. If you put it after the function pointer
+typedefs, the calling convention will be wrong and every UEFI call will
+corrupt its arguments. This is the single most important line in the
+entire boot chain.
+</blockquote>
+
+<h2>Our own type definitions</h2>
+
+<p>
+Since we cannot include any standard headers (<code>-nostdinc</code>),
+we must define every type ourselves. Here is our
+<code>include/kernel/types.h</code>:
+</p>
+
+<pre><code>#ifndef TURTLE_TYPES_H
+#define TURTLE_TYPES_H
+
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+typedef unsigned long uint64_t;
+
+typedef signed char int8_t;
+typedef signed short int16_t;
+typedef signed int int32_t;
+typedef signed long int64_t;
+
+typedef unsigned long size_t;
+typedef signed long ssize_t;
+typedef signed long ptrdiff_t;
+typedef unsigned long uintptr_t;
+typedef signed long intptr_t;
+
+#define NULL ((void *)0)
+
+#ifndef TRUE
+#define TRUE 1
+#endif
+#ifndef FALSE
+#define FALSE 0
+#endif
+
+#define BIT(n) (1UL &lt;&lt; (n))
+
+#endif</code></pre>
+
+<p>
+Key point: on x86_64 Linux, <code>unsigned long</code> is 8 bytes. This
+is important because the UEFI spec defines <code>UINTN</code> as
+"native width unsigned integer", which is 8 bytes on 64-bit platforms.
+</p>
+
+<h2>EFI types</h2>
+
+<p>
+Now we define the UEFI types in <code>include/boot/efi.h</code>. The
+UEFI specification uses a set of integer types and handles:
+</p>
+
+<pre><code>#define EFIAPI __attribute__((ms_abi))
+
+typedef uint16_t CHAR16;
+typedef uint8_t  UINT8;
+typedef uint16_t UINT16;
+typedef uint32_t UINT32;
+typedef uint64_t UINT64;
+typedef uint64_t UINTN;
+typedef int32_t  INT32;
+typedef int64_t  INT64;
+typedef uint64_t EFI_STATUS;
+typedef void    *EFI_HANDLE;
+typedef void    *EFI_EVENT;
+typedef uint64_t EFI_PHYSICAL_ADDRESS;</code></pre>
+
+<p>
+<code>EFI_STATUS</code> is the return type for every UEFI function. A
+value of 0 means success. Error codes have the high bit set (bit 63).
+This is checked with a macro:
+</p>
+
+<pre><code>#define EFI_ERROR(status) (((INT64)(status)) &lt; 0)</code></pre>
+
+<blockquote class="warning">
+<strong>The INT64 cast is critical.</strong> If you cast to
+<code>INT32</code> instead, then <code>0x8000000000000005ULL</code>
+gets truncated to <code>0x00000005</code>, which is positive, and
+<code>EFI_ERROR()</code> returns <strong>FALSE</strong> for every
+error code. We spent hours debugging this. Always use <code>INT64</code>.
+</blockquote>
+
+<h2>EFI error codes</h2>
+
+<p>
+The UEFI spec defines error codes with the high bit set. We define the
+ones we need:
+</p>
+
+<pre><code>#define EFI_SUCCESS             0
+#define EFI_LOAD_ERROR          0x8000000000000001ULL
+#define EFI_INVALID_PARAMETER   0x8000000000000002ULL
+#define EFI_UNSUPPORTED         0x8000000000000003ULL
+#define EFI_BAD_BUFFER_SIZE     0x8000000000000004ULL
+#define EFI_BUFFER_TOO_SMALL    0x8000000000000005ULL
+#define EFI_OUT_OF_RESOURCES    0x8000000000000009ULL
+#define EFI_NOT_FOUND           0x800000000000000EULL</code></pre>
+
+<blockquote class="warning">
+<strong>The ULL suffix is mandatory.</strong> Without it,
+<code>0x8000000000000005</code> may be interpreted as a 32-bit literal
+by the compiler, causing truncation. Always use <code>ULL</code> for
+EFI error codes.
+</blockquote>
+
+<h2>EFI_GUID</h2>
+
+<p>
+UEFI identifies protocols and configuration tables using GUIDs
+(Globally Unique Identifiers), also known as UUIDs. The layout matches
+the EFI spec exactly:
+</p>
+
+<pre><code>typedef struct {
+    UINT32 Data1;
+    UINT16 Data2;
+    UINT16 Data3;
+    UINT8  Data4[8];
+} EFI_GUID;</code></pre>
+
+<p>
+GUIDs are specified as C struct initializers in our code. For example,
+the Graphics Output Protocol GUID:
+</p>
+
+<pre><code>#define EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID \
+    { 0x9042a9de, 0x23dc, 0x4a38, \
+      { 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a } }</code></pre>
+
+<h2>EFI_MEMORY_DESCRIPTOR</h2>
+
+<p>
+The memory map returned by <code>GetMemoryMap</code> consists of an
+array of these descriptors:
+</p>
+
+<pre><code>typedef struct {
+    UINT32 Type;
+    UINT32 Pad;
+    UINT64 PhysicalStart;
+    UINT64 VirtualStart;
+    UINT64 NumberOfPages;
+    UINT64 Attribute;
+} EFI_MEMORY_DESCRIPTOR;</code></pre>
+
+<p>
+The <code>Pad</code> field aligns the struct to 8 bytes. Each descriptor
+describes a contiguous range of memory of a given type (conventional,
+reserved, MMIO, etc.).
+</p>
+
+<h2>EFI_SYSTEM_TABLE &mdash; the most important struct</h2>
+
+<p>
+This is the most important structure. UEFI passes a pointer to it as the
+second argument to our entry point. It contains pointers to console I/O,
+boot services, runtime services, and the configuration table array.
+</p>
+
+<pre><code>typedef struct {
+    EFI_TABLE_HEADER Hdr;
+    CHAR16 *FirmwareVendor;
+    UINT32  FirmwareRevision;
+    UINT32  __pad0;                     /* alignment padding */
+    EFI_HANDLE ConsoleInHandle;
+    void      *ConIn;
+    EFI_HANDLE ConsoleOutHandle;
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
+    EFI_HANDLE StandardErrorHandle;
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *StdErr;
+    void      *RuntimeServices;
+    EFI_BOOT_SERVICES *BootServices;
+    UINTN     NumberOfTableEntries;
+    EFI_CONFIGURATION_TABLE *ConfigurationTable;
+} EFI_SYSTEM_TABLE;</code></pre>
+
+<blockquote class="warning">
+<strong>The struct layout must match UEFI exactly.</strong> We
+originally omitted five fields (ConsoleInHandle, ConIn, ConsoleOutHandle,
+StdErr, StandardErrorHandle) and had the wrong padding. This pushed
+BootServices from offset 96 to offset 48 &mdash; meaning our
+<code>g_BS</code> pointer was reading garbage. This bug took days to
+find. The UEFI spec lists every field; count the offsets yourself.
+</blockquote>
+
+<h2>EFI_BOOT_SERVICES</h2>
+
+<p>
+This is the table of function pointers we use during the boot phase. It
+contains ~40 functions. We declare each function pointer type separately
+for type safety, then fill in the struct in order. For functions we
+don't call, we use <code>void *</code> as a placeholder:
+</p>
+
+<pre><code>typedef struct {
+    EFI_TABLE_HEADER Hdr;
+    void *RaiseTPL;
+    void *RestoreTPL;
+    efi_allocate_pages     *AllocatePages;
+    efi_free_pages         *FreePages;
+    efi_get_memory_map     *GetMemoryMap;
+    efi_allocate_pool      *AllocatePool;
+    efi_free_pool          *FreePool;
+    void *CreateEvent;
+    void *SetTimer;
+    /* ... many more ... */
+    efi_exit_boot_services *ExitBootServices;
+    /* ... */
+    efi_open_protocol      *OpenProtocol;
+    /* ... */
+    efi_locate_protocol    *LocateProtocol;
+    /* ... remaining fields ... */
+} EFI_BOOT_SERVICES;</code></pre>
+
+<p>
+We use <code>void *</code> for function pointers we don't call. This
+keeps the struct compact while ensuring every field is at the correct
+offset. The fields we <em>do</em> call have proper typedefs with the
+<code>EFIAPI</code> attribute so the compiler generates the correct
+calling convention.
+</p>
+
+<h2>Verifying struct offsets</h2>
+
+<p>
+A single wrong offset will crash your boot. After writing
+<code>efi.h</code>, verify the critical offsets:
+</p>
+
+<pre><code>/* Quick test program (compile with host gcc, not freestanding) */
+#include &lt;stdio.h&gt;
+#include "include/boot/efi.h"
+
+int main(void) {
+    printf("sizeof(EFI_SYSTEM_TABLE) = %zu\n", sizeof(EFI_SYSTEM_TABLE));
+    printf("BootServices offset      = %zu\n",
+           (size_t)&amp;((EFI_SYSTEM_TABLE *)0)-&gt;BootServices);
+    printf("ConOut offset            = %zu\n",
+           (size_t)&amp;((EFI_SYSTEM_TABLE *)0)-&gt;ConOut);
+
+    printf("sizeof(EFI_BOOT_SERVICES) = %zu\n", sizeof(EFI_BOOT_SERVICES));
+    printf("GetMemoryMap offset       = %zu\n",
+           (size_t)&amp;((EFI_BOOT_SERVICES *)0)-&gt;GetMemoryMap);
+    printf("ExitBootServices offset   = %zu\n",
+           (size_t)&amp;((EFI_BOOT_SERVICES *)0)-&gt;ExitBootServices);
+    printf("OpenProtocol offset       = %zu\n",
+           (size_t)&amp;((EFI_BOOT_SERVICES *)0)-&gt;OpenProtocol);
+    printf("LocateProtocol offset     = %zu\n",
+           (size_t)&amp;((EFI_BOOT_SERVICES *)0)-&gt;LocateProtocol);
+    return 0;
+}</code></pre>
+
+<p>
+Expected output (verified against the UEFI spec):
+</p>
+
+<pre><code>sizeof(EFI_SYSTEM_TABLE)  = 104
+BootServices offset       = 96
+ConOut offset             = 56
+sizeof(EFI_BOOT_SERVICES) = 280
+GetMemoryMap offset       = 56
+ExitBootServices offset   = 232
+OpenProtocol offset       = 280
+LocateProtocol offset     = 312</code></pre>
+
+<p>
+If your offsets don't match, you have a missing field, wrong padding,
+or a wrong type size. <strong>Do not proceed until they match.</strong>
+</p>
+
+<div class="nav">
+<a href="01-introduction.html">&larr; 1. Introduction</a>
+<a href="03-entry.html">3. The Boot Entry &amp; ABI Bridge &rarr;</a>
+</div>
+
+</body>
+</html>

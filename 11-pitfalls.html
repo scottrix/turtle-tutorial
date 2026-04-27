@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 11: Lessons Learned &amp; Pitfalls</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>11. Lessons Learned &amp; Pitfalls</h1>
+
+<p>
+Every OS developer hits a long tail of obscure bugs. This chapter
+documents every hard-won discovery we made, so you can avoid the same
+pain.
+</p>
+
+<h2>1. EFI_SYSTEM_TABLE offset bug</h2>
+
+<p>
+<strong>Symptom:</strong> <code>g_BS</code> pointed to garbage. Every
+boot service call crashed or returned nonsense.
+</p>
+
+<p>
+<strong>Cause:</strong> Our <code>EFI_SYSTEM_TABLE</code> struct was
+missing five fields: <code>ConsoleInHandle</code>, <code>ConIn</code>,
+<code>ConsoleOutHandle</code>, <code>StandardErrorHandle</code>, and
+<code>StdErr</code>. Five missing 8-byte fields = 40 bytes. This
+shifted <code>BootServices</code> from offset 96 to offset 48.
+</p>
+
+<p>
+<strong>Fix:</strong> Read the UEFI spec carefully and add every field.
+Verify offsets with a test program (see Chapter 2).
+</p>
+
+<h2>2. EFI error codes: the missing high bit</h2>
+
+<p>
+<strong>Symptom:</strong> Comparisons like
+<code>status == EFI_BUFFER_TOO_SMALL</code> never matched, even when
+the firmware returned that error.
+</p>
+
+<p>
+<strong>Cause:</strong> We defined
+<code>EFI_BUFFER_TOO_SMALL = 5</code>. But UEFI returns
+<code>0x8000000000000005</code>. The high bit (bit 63) is set for all
+error codes.
+</p>
+
+<p>
+<strong>Fix:</strong> Define error codes with the <code>ULL</code>
+suffix and the high bit:
+</p>
+
+<pre><code>#define EFI_BUFFER_TOO_SMALL 0x8000000000000005ULL</code></pre>
+
+<h2>3. EFI_ERROR macro: INT32 truncation</h2>
+
+<p>
+<strong>Symptom:</strong> <code>EFI_ERROR(status)</code> always
+returned <code>FALSE</code>, even for error statuses.
+</p>
+
+<p>
+<strong>Cause:</strong> We had
+<code>#define EFI_ERROR(s) (((INT32)(s)) &lt; 0)</code>. Casting
+<code>0x8000000000000005</code> to <code>INT32</code> truncates to
+<code>0x00000005</code>, which is positive. The sign bit we were
+checking is in bit 63, not bit 31.
+</p>
+
+<p>
+<strong>Fix:</strong> Cast to <code>INT64</code>:
+</p>
+
+<pre><code>#define EFI_ERROR(status) (((INT64)(status)) &lt; 0)</code></pre>
+
+<h2>4. LocateProtocol returns INVALID_PARAMETER</h2>
+
+<p>
+<strong>Symptom:</strong> <code>LocateProtocol</code> fails for every
+GUID, not just GOP.
+</p>
+
+<p>
+<strong>Cause:</strong> Unknown. Possibly an OVMF bug or interaction
+with the gnu-efi relocator. We verified the calling convention and
+GUID bytes in disassembly.
+</p>
+
+<p>
+<strong>Fix:</strong> Use <code>LocateHandle</code> +
+<code>OpenProtocol</code> instead (see Chapter 5). This two-step
+approach works perfectly.
+</p>
+
+<h2>5. Serial MMIO after ExitBootServices</h2>
+
+<p>
+<strong>Symptom:</strong> Writing to <code>0x3F8</code> as a memory
+address causes a page fault after EBS.
+</p>
+
+<p>
+<strong>Cause:</strong> <code>0x3F8</code> as a memory address is not
+the serial port. It's just an address in low memory that UEFI's page
+tables may or may not map. The serial port is at I/O port 0x3F8,
+accessed via <code>in</code>/<code>out</code> instructions, not memory
+reads/writes.
+</p>
+
+<p>
+<strong>Fix:</strong> Use <code>outb</code> with the I/O port:
+</p>
+
+<pre><code>__asm__ volatile("outb %0, %1" : : "a"(c), "Nd"(0x3F8));</code></pre>
+
+<h2>6. GDT granularity: wrong L/D bits</h2>
+
+<p>
+<strong>Symptom:</strong> Triple fault on <code>lretq</code> after
+loading the GDT.
+</p>
+
+<p>
+<strong>Cause:</strong> We used granularity byte <code>0xA</code> for
+the code descriptor. This has L=0, D=1 &mdash; meaning "32-bit code
+segment". But we're in 64-bit long mode. The CPU tried to enter 32-bit
+compatibility mode and faulted.
+</p>
+
+<p>
+<strong>Fix:</strong> For 64-bit code, the granularity byte must be
+<code>0xAF</code> (G=1, D=0, L=1, limit=0xF). For data segments in
+long mode, use <code>0xCF</code> (G=1, D/B=1, L=0, limit=0xF).
+</p>
+
+<h2>7. ExitBootServices map-key invalidation</h2>
+
+<p>
+<strong>Symptom:</strong> <code>ExitBootServices</code> returns
+<code>EFI_INVALID_PARAMETER</code>.
+</p>
+
+<p>
+<strong>Cause:</strong> We called <code>print()</code> (which calls
+<code>ConOut-&gt;OutputString</code>) between <code>GetMemoryMap</code>
+and <code>ExitBootServices</code>. This boot service call changed the
+memory map, invalidating the key.
+</p>
+
+<p>
+<strong>Fix:</strong> No boot service calls between the final
+<code>GetMemoryMap</code> and <code>ExitBootServices</code>. Allocate
+the buffer before <code>GetMemoryMap</code>, call
+<code>GetMemoryMap</code>, then immediately call
+<code>ExitBootServices</code>.
+</p>
+
+<h2>8. entry.c compiled with wrong flags</h2>
+
+<p>
+<strong>Symptom:</strong> Linker errors about R_X86_64_64 relocations
+and DT_TEXTREL.
+</p>
+
+<p>
+<strong>Cause:</strong> The Makefile's pattern rule matched
+<code>entry.c</code> with <code>KERNEL_CFLAGS</code>
+(<code>-fno-pic -mcmodel=large</code>), producing absolute
+relocations. EFI code must be compiled with <code>-fpic -shared</code>.
+</p>
+
+<p>
+<strong>Fix:</strong> Add explicit rules for
+<code>build/boot/entry.o</code> and <code>build/boot/efi_main.o</code>
+that use <code>EFI_CFLAGS</code>.
+</p>
+
+<h2>9. QEMU OVMF on older versions</h2>
+
+<p>
+<strong>Symptom:</strong> QEMU immediately crashes or OVMF fails to
+initialize.
+</p>
+
+<p>
+<strong>Cause:</strong> OVMF's 4MB pflash images require QEMU 8.0+.
+Older QEMU versions had bugs with the pflash driver.
+</p>
+
+<p>
+<strong>Fix:</strong> Use QEMU 8.0 or later. On Arch Linux,
+<code>sudo pacman -S qemu-system-x86</code> gives you a current
+version.
+</p>
+
+<h2>10. UART THR-empty bit in QEMU</h2>
+
+<p>
+<strong>Symptom:</strong> Serial output hangs when polling the Line
+Status Register (<code>inb(0x3FD) &amp; 0x20</code>).
+</p>
+
+<p>
+<strong>Cause:</strong> QEMU's emulated 16550 UART doesn't set the
+THR-empty bit in a timely manner. Polling loops spin forever.
+</p>
+
+<p>
+<strong>Fix:</strong> Use a delay loop between characters instead of
+polling. Not ideal for production, but works for development.
+</p>
+
+<hr>
+
+<p>
+The common thread in most of these bugs: <strong>the UEFI firmware is
+an unforgiving environment</strong>. There's no printf, no debugger
+(you can attach GDB to QEMU, but it's tricky with UEFI), and a wrong
+offset or calling convention crashes silently. Build incrementally,
+test after every change, and always have serial output as a debug
+channel.
+</p>
+
+<div class="nav">
+<a href="10-build-system.html">&larr; 10. The Build System</a>
+<a href="12-whats-next.html">12. What's Next &rarr;</a>
+</div>
+
+</body>
+</html>

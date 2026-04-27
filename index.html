@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Writing a 64-bit UEFI OS in ANSI C</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="hero">
+<h1>Turtle OS</h1>
+<div class="subtitle">Writing a 64-bit UEFI Operating System in ANSI C</div>
+<div class="tagline">
+A from-scratch tutorial on booting a freestanding C kernel via UEFI,
+setting up the GDT, driving a framebuffer console, and printing your
+first message &mdash; with no dependencies beyond GCC, GNU ld, and QEMU.
+</div>
+</div>
+
+<p>
+This tutorial walks through building a bootable 64-bit x86_64 operating
+system from nothing. We use the <strong>UEFI</strong> firmware interface
+(not the legacy BIOS int 0x10 world), write our own EFI type definitions
+instead of relying on gnu-efi, and end up with a kernel that boots in
+QEMU and prints to both a graphical framebuffer and a serial port.
+</p>
+
+<p>
+The style follows the tradition of books like <em>MMURTl v1.0</em>
+and <em>Linux from Scratch</em>: every line of code is shown and
+explained. Nothing is hidden behind a framework or a library you
+haven't read.
+</p>
+
+<h2>What you need to know</h2>
+
+<ul>
+<li>ANSI C &mdash; we use C11, freestanding, no standard library</li>
+<li>x86 assembly basics &mdash; registers, instructions, what a stack frame is</li>
+<li>How to use a terminal and a text editor</li>
+</ul>
+
+<p>
+You do <strong>not</strong> need to know UEFI, the 64-bit GDT, paging,
+or anything about boot protocols. We explain each of these as we
+encounter them.
+</p>
+
+<h2>Chapters</h2>
+
+<ol class="chapter-list">
+<li>
+<a href="01-introduction.html">Introduction &amp; Prerequisites</a>
+<span class="desc">What we're building, tools you need, project layout</span>
+</li>
+<li>
+<a href="02-efi-types.html">UEFI Fundamentals &amp; EFI Type Definitions</a>
+<span class="desc">Why UEFI, the EFIAPI calling convention, and our own type headers</span>
+</li>
+<li>
+<a href="03-entry.html">The Boot Entry Point &amp; ABI Bridge</a>
+<span class="desc">How UEFI calls our code, and why we need a SYSV&ndash;MS ABI bridge</span>
+</li>
+<li>
+<a href="04-efi-main.html">EFI Main: The UEFI Boot Phase</a>
+<span class="desc">Console output, watchdog timer, the boot services life cycle</span>
+</li>
+<li>
+<a href="05-gop.html">The Graphics Output Protocol</a>
+<span class="desc">Getting a framebuffer from UEFI: LocateHandle, OpenProtocol, pixel formats</span>
+</li>
+<li>
+<a href="06-memory-ebs.html">Memory Map &amp; ExitBootServices</a>
+<span class="desc">Reading the memory map, the EBS map-key trap, switching to kernel mode</span>
+</li>
+<li>
+<a href="07-gdt.html">The GDT in 64-bit Long Mode</a>
+<span class="desc">64-bit segment descriptors, TSS, loading a new GDT with lretq</span>
+</li>
+<li>
+<a href="08-kernel-main.html">Kernel Main &amp; Serial I/O</a>
+<span class="desc">Post-EBS serial via outb, boot_info, the kernel entry point</span>
+</li>
+<li>
+<a href="09-framebuffer.html">The Framebuffer Console</a>
+<span class="desc">PC screen fonts, pixel drawing, scrolling, printk</span>
+</li>
+<li>
+<a href="10-build-system.html">The Build System</a>
+<span class="desc">Makefile, EFI linker script, objcopy, FAT disk image, QEMU</span>
+</li>
+<li>
+<a href="11-pitfalls.html">Lessons Learned &amp; Pitfalls</a>
+<span class="desc">Every bug we hit and how we fixed it &mdash; save yourself the pain</span>
+</li>
+<li>
+<a href="12-whats-next.html">What's Next</a>
+<span class="desc">Page tables, IDT, the road to a self-hosting OS</span>
+</li>
+</ol>
+
+<h2>Source code</h2>
+
+<p>
+The complete source code for the OS described in this tutorial is
+available at:
+</p>
+
+<pre><code>https://github.com/anomalyco/turtle</code></pre>
+
+<p>
+Each chapter references the relevant files. By the end of Chapter 10 you
+will have a bootable disk image that prints to both the screen and the
+serial port.
+</p>
+
+<hr>
+
+<p style="font-size:0.85rem; color:#888; text-align:center;">
+Turtle OS Tutorial &mdash; 2025 &mdash; Written in the open
+</p>
+
+</body>
+</html>

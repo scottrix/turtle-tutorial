@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 3: The Boot Entry Point &amp; ABI Bridge</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>3. The Boot Entry Point &amp; ABI Bridge</h1>
+
+<h2>How UEFI calls our code</h2>
+
+<p>
+When the UEFI firmware loads <code>BOOTX64.EFI</code>, it calls the PE
+entry point with two arguments:
+</p>
+
+<ul>
+<li><strong>ImageHandle</strong> (in rcx) &mdash; a handle representing our
+    loaded image</li>
+<li><strong>SystemTable</strong> (in rdx) &mdash; a pointer to the
+    EFI_SYSTEM_TABLE</li>
+</ul>
+
+<p>
+These arrive via the <strong>Microsoft x64 calling convention</strong>
+(rcx, rdx, r8, r9). But our C code, compiled with GCC, expects the
+<strong>System V AMD64</strong> convention (rdi, rsi, rdx, rcx). We
+need a bridge.
+</p>
+
+<h2>The entry point: entry.c</h2>
+
+<p>
+Our bridge is deliberately simple. The gnu-efi
+<code>crt0-efi-x86_64.o</code> startup code receives the UEFI call
+(using the MS ABI), then calls our <code>_entry</code> function. Our
+<code>_entry</code> just forwards to <code>efi_main</code>:
+</p>
+
+<pre><code>#include &lt;boot/efi.h&gt;
+
+extern EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle,
+                                   EFI_SYSTEM_TABLE *SystemTable);
+
+void _entry(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
+{
+    efi_main(ImageHandle, SystemTable);
+}</code></pre>
+
+<p>
+Wait &mdash; <code>_entry</code> is compiled with the System V ABI
+(because GCC defaults to it), but it's called from the MS-ABI
+<code>crt0</code> startup code. How does this work?
+</p>
+
+<p>
+The gnu-efi <code>crt0-efi-x86_64.o</code> does the argument
+shuffling for us. It receives (rcx=ImageHandle, rdx=SystemTable),
+then moves them to (rdi, rsi) before calling our <code>_entry</code>.
+So by the time <code>_entry</code> runs, the arguments are already in
+System V registers.
+</p>
+
+<p>
+Then <code>_entry</code> calls <code>efi_main</code>, which is declared
+with <code>EFIAPI</code> (= <code>__attribute__((ms_abi))</code>). GCC
+automatically generates the code to shuffle (rdi, rsi) back to (rcx,
+rdx) for that call. The compiler handles all the ABI translation.
+</p>
+
+<h2>Why EFIAPI on efi_main?</h2>
+
+<p>
+You might wonder: if <code>_entry</code> is SYSV ABI, and it calls
+<code>efi_main</code>, why does <code>efi_main</code> need to be
+MS ABI?
+</p>
+
+<p>
+Because <code>efi_main</code> calls UEFI boot services
+(<code>g_BS-&gt;GetMemoryMap</code>, etc.), and those function pointers
+expect to be called with the MS ABI. If <code>efi_main</code> itself
+were SYSV ABI, then every time it called a boot service function
+pointer, it would need an explicit assembly shim. By making
+<code>efi_main</code> MS ABI, GCC handles the convention
+automatically for all calls inside it.
+</p>
+
+<blockquote class="tip">
+In practice, the simplest approach is: make <code>efi_main</code> and
+every function it calls that touches UEFI APIs use
+<code>EFIAPI</code>. Functions that are pure C (no UEFI calls) can
+stay SYSV ABI. Our <code>entry.c</code> bridge is just a
+one-line forwarder.
+</blockquote>
+
+<h2>What about the stack?</h2>
+
+<p>
+UEFI firmware sets up a stack for us before calling the entry point.
+The gnu-efi <code>crt0</code> code allocates an additional 64KB of
+stack space and aligns it to 16 bytes. We don't need to do anything
+special &mdash; we can use local variables, function calls, and
+recursion normally.
+</p>
+
+<h2>The flow, visualized</h2>
+
+<pre><code>UEFI firmware
+    |
+    | (MS ABI: rcx=ImageHandle, rdx=SystemTable)
+    v
+crt0-efi-x86_64.o (gnu-efi startup)
+    |
+    | (shuffles to SYSV ABI: rdi=ImageHandle, rsi=SystemTable)
+    v
+_entry() in entry.c
+    |
+    | (GCC auto-shuffles back to MS ABI: rcx, rdx)
+    v
+efi_main() in efi_main.c    [EFIAPI = __attribute__((ms_abi))]
+    |
+    | (MS ABI function pointers in BootServices)
+    v
+UEFI boot services (GetMemoryMap, ExitBootServices, etc.)</code></pre>
+
+<p>
+The key insight: <strong>the compiler does the heavy lifting</strong>.
+We just need the <code>EFIAPI</code> annotation on the right functions,
+and GCC generates all the register shuffling code.
+</p>
+
+<div class="nav">
+<a href="02-efi-types.html">&larr; 2. UEFI &amp; EFI Types</a>
+<a href="04-efi-main.html">4. EFI Main: The UEFI Boot Phase &rarr;</a>
+</div>
+
+</body>
+</html>

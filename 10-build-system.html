@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 10: The Build System</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>10. The Build System</h1>
+
+<p>
+Building a UEFI boot application is different from building a normal
+executable. The output must be a PE+ (Portable Executable 64-bit) file,
+not an ELF binary. The UEFI PE loader doesn't understand ELF. We use
+a two-step process: link as ELF, then convert to PE.
+</p>
+
+<h2>Compiler flags</h2>
+
+<p>
+We have two sets of flags: one for EFI boot code (compiled as
+position-independent shared library) and one for kernel code (compiled
+as a freestanding large-model binary):
+</p>
+
+<h3>EFI flags</h3>
+
+<pre><code>EFI_CFLAGS = -ffreestanding -fshort-wchar -fpic -fno-stack-protector \
+             -fno-lto -fno-exceptions -fno-unwind-tables \
+             -fno-asynchronous-unwind-tables \
+             -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
+             -Wall -Wextra -std=c11 -O2 -Iinclude</code></pre>
+
+<ul>
+<li><code>-fshort-wchar</code> &mdash; makes <code>wchar_t</code>
+    2 bytes (UEFI uses <code>CHAR16</code>, and <code>L"string"</code>
+    literals must produce 2-byte characters)</li>
+<li><code>-fpic</code> &mdash; position-independent code. UEFI loads
+    our image at a dynamic address and the relocator patches up
+    GOT-relative references. Without <code>-fpic</code>, we'd get
+    absolute relocations that the PE loader can't handle.</li>
+<li><code>-mno-red-zone</code> &mdash; the x86_64 red zone (128 bytes
+    below RSP that signal handlers won't clobber) is not safe in a
+    kernel or bootloader. Interrupts can fire at any time and overwrite
+    it.</li>
+<li><code>-mno-mmx -mno-sse -mno-sse2</code> &mdash; UEFI firmware
+    may not have set up SSE. We avoid all SSE instructions so the
+    compiler doesn't generate them.</li>
+</ul>
+
+<h3>Kernel flags</h3>
+
+<pre><code>KERNEL_CFLAGS = -ffreestanding -nostdlib -nostdinc \
+                -fno-pic -fno-pie -fno-stack-protector \
+                -mcmodel=large -mno-red-zone \
+                -mno-mmx -mno-sse -mno-sse2 \
+                -Wall -Wextra -std=c11 -O2 -Iinclude</code></pre>
+
+<ul>
+<li><code>-fno-pic</code> &mdash; kernel code uses absolute addressing
+    (it will run at a known virtual address once we set up page tables)</li>
+<li><code>-mcmodel=large</code> &mdash; allows the kernel to be loaded
+    at any address, including above 2GB. Without this, the compiler
+    assumes all code and data are within the low 2GB.</li>
+</ul>
+
+<blockquote class="warning">
+<strong>entry.c must be compiled with EFI_CFLAGS, not KERNEL_CFLAGS.</strong>
+Our Makefile originally used a pattern rule that matched entry.c with
+KERNEL_CFLAGS. This caused <code>-fno-pic -mcmodel=large</code> to be
+applied, producing absolute R_X86_64_64 relocations. The ELF-to-PE
+conversion can't handle these, and the resulting binary crashed. We
+now have an explicit rule for entry.o that uses EFI_CFLAGS.
+</blockquote>
+
+<h2>The EFI linker script</h2>
+
+<p>
+<code>efi_linker.ld</code> defines the section layout:
+</p>
+
+<pre><code>OUTPUT_FORMAT(elf64-x86-64)
+ENTRY(efi_main)
+
+SECTIONS
+{
+    . = 0;
+    ImageBase = .;
+    .hash : { *(.hash) }
+    .gnu.hash : { *(.gnu.hash) }
+    . = ALIGN(4096);
+    .text : { *(.text) *(.text.*) . = ALIGN(16); }
+    . = ALIGN(4096);
+    .rodata : { *(.rodata) *(.rodata.*) }
+    . = ALIGN(4096);
+    .data : {
+        *(.got.plt) *(.got) *(.data) *(.data.*)
+        *(.sdata) *(.sbss) *(.scommon) *(.dynbss)
+        *(.bss) *(.bss.*) *(COMMON)
+    }
+    . = ALIGN(4096);
+    .reloc : { KEEP (*(.reloc)) }
+    . = ALIGN(4096);
+    .dynamic : { *(.dynamic) }
+    . = ALIGN(4096);
+    .rela : { *(.rela.text*) *(.rela.data*) *(.rela.got) *(.rela.dyn) }
+    /* ... more sections ... */
+    /DISCARD/ : { *(.comment) *(.note.*) *(.eh_frame) }
+}</code></pre>
+
+<p>
+Key points:
+</p>
+
+<ul>
+<li><code>ImageBase = 0</code> &mdash; the image is relocatable; the
+    actual load address is determined by UEFI</li>
+<li>Sections are 4096-byte aligned &mdash; UEFI expects page-aligned
+    sections</li>
+<li><code>.reloc</code> is kept &mdash; this is the PE relocation
+    section that the UEFI loader uses</li>
+<li><code>.eh_frame</code> is discarded &mdash; we don't use C++
+    exception handling or stack unwinding</li>
+</ul>
+
+<h2>Linking</h2>
+
+<pre><code>EFI_LDFLAGS = -nostdlib -z noexecstack -shared -Bsymbolic \
+              -T efi_linker.ld \
+              /usr/lib/crt0-efi-x86_64.o \
+              /usr/lib/libgnuefi.a
+
+ld $(EFI_LDFLAGS) -o build/turtle.elf $(EFI_OBJS)</code></pre>
+
+<ul>
+<li><code>-shared</code> &mdash; produce a shared library (ET_DYN),
+    which is what UEFI expects</li>
+<li><code>-Bsymbolic</code> &mdash; resolve all symbol references
+    within the binary at link time, reducing the number of relocations
+    the gnu-efi relocator needs to fix up</li>
+<li><code>crt0-efi-x86_64.o</code> &mdash; gnu-efi startup code
+    (handles the PE entry point, stack allocation, and calling our
+    <code>_entry</code>)</li>
+<li><code>libgnuefi.a</code> &mdash; contains
+    <code>reloc_x86_64.o</code>, the self-relocator that patches
+    <code>.rela</code> entries at runtime</li>
+</ul>
+
+<h2>ELF to PE conversion</h2>
+
+<pre><code>objcopy -I elf64-x86-64 -O pei-x86-64 \
+    -j .text -j .sdata -j .data -j .dynamic \
+    -j .dynsym -j .rela -j .rela.* -j .reloc \
+    -j .rodata -j .rodata.* \
+    --subsystem=10 \
+    build/turtle.elf build/turtle.efi</code></pre>
+
+<p>
+<code>--subsystem=10</code> is the EFI subsystem ID. This tells the
+UEFI loader that this is a boot application. The <code>-j</code> flags
+select only the sections we want (excluding debug info, comments,
+etc.).
+</p>
+
+<h2>Creating the disk image</h2>
+
+<p>
+UEFI boots from a FAT32 filesystem. We create a 4MB image, format it,
+and copy our EFI binary to the expected path:
+</p>
+
+<pre><code>dd if=/dev/zero of=build/turtle.img bs=1M count=4
+mkfs.vfat build/turtle.img
+mmd -i build/turtle.img ::EFI ::EFI/BOOT
+mcopy -i build/turtle.img build/turtle.efi ::EFI/BOOT/BOOTX64.EFI</code></pre>
+
+<p>
+The path <code>\EFI\BOOT\BOOTX64.EFI</code> is the UEFI fallback boot
+path &mdash; any UEFI firmware will look for this file on a FAT
+partition and load it if no other boot entry is configured.
+</p>
+
+<h2>Running in QEMU</h2>
+
+<pre><code>qemu-system-x86_64 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
+    -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.4m.fd \
+    -drive if=virtio,format=raw,file=build/turtle.img \
+    -m 128M -net none -serial stdio -vga std -no-reboot</code></pre>
+
+<p>
+Breaking down the QEMU flags:
+</p>
+
+<ul>
+<li><code>-drive if=pflash,...,file=OVMF_CODE.4m.fd</code> &mdash;
+    the UEFI firmware code (read-only). This is OVMF, the open-source
+    UEFI implementation from the TianoCore project.</li>
+<li><code>-drive if=pflash,...,file=OVMF_VARS.4m.fd</code> &mdash;
+    the UEFI variable store (writable). This stores boot configuration.
+    We copy a fresh copy each run to avoid stale state.</li>
+<li><code>-drive if=virtio,...,file=turtle.img</code> &mdash; our
+    disk image. Using virtio for better performance than IDE.</li>
+<li><code>-m 128M</code> &mdash; 128MB of RAM (plenty for our kernel)</li>
+<li><code>-serial stdio</code> &mdash; redirect the first serial port
+    (COM1) to the terminal. This is how we see serial output.</li>
+<li><code>-vga std</code> &mdash; standard VGA, which enables the
+    GOP framebuffer in OVMF</li>
+<li><code>-no-reboot</code> &mdash; exit QEMU instead of rebooting
+    on a triple fault (useful for debugging)</li>
+</ul>
+
+<h2>The full build flow</h2>
+
+<pre><code>make efi-run
+
+# This runs the following steps:
+#
+# 1. Compile each .c file with gcc (EFI_CFLAGS or KERNEL_CFLAGS)
+# 2. Convert font.bin to font.o with objcopy
+# 3. Link all .o files with ld + crt0-efi + libgnuefi.a
+# 4. Convert turtle.elf to turtle.efi with objcopy
+# 5. Create turtle.img (FAT filesystem with BOOTX64.EFI)
+# 6. Copy fresh OVMF_VARS
+# 7. Launch QEMU</code></pre>
+
+<p>
+If everything works, you should see:
+</p>
+
+<pre><code>Turtle OS v0.1 (UEFI)
+GOP: 1280x800 @ 0x80000000
+Memory: 121 MB
+Boot services exited
+GDT loaded
+Turtle OS kernel_main reached!
+Kernel initialized.</code></pre>
+
+<p>
+The first three lines come from UEFI console output (before EBS). The
+last three come from serial output (after EBS). The QEMU window also
+shows the framebuffer console output from <code>printk</code>.
+</p>
+
+<div class="nav">
+<a href="09-framebuffer.html">&larr; 9. The Framebuffer Console</a>
+<a href="11-pitfalls.html">11. Lessons Learned &amp; Pitfalls &rarr;</a>
+</div>
+
+</body>
+</html>

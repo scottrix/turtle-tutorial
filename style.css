@@ -1,0 +1,263 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 16px;
+  line-height: 1.7;
+  color: #1a1a2e;
+  background: #fafafa;
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+h1, h2, h3, h4 {
+  font-family: 'Iosevka', 'Fira Code', 'Consolas', monospace;
+  font-weight: 700;
+  line-height: 1.3;
+  margin-top: 2em;
+  margin-bottom: 0.6em;
+  color: #0f0f23;
+}
+
+h1 {
+  font-size: 2rem;
+  border-bottom: 3px solid #16c79a;
+  padding-bottom: 0.4rem;
+  margin-top: 0;
+}
+
+h2 {
+  font-size: 1.5rem;
+  border-bottom: 1px solid #e0e0e0;
+  padding-bottom: 0.3rem;
+}
+
+h3 { font-size: 1.25rem; }
+
+p {
+  margin-bottom: 1em;
+}
+
+a {
+  color: #0d7377;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.2s;
+}
+
+a:hover {
+  border-bottom-color: #0d7377;
+}
+
+pre {
+  background: #0f0f23;
+  color: #c5c8c6;
+  padding: 1.2em 1.5em;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 1em 0 1.5em;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  border-left: 4px solid #16c79a;
+}
+
+code {
+  font-family: 'Iosevka', 'Fira Code', 'Consolas', 'Courier New', monospace;
+}
+
+:not(pre) > code {
+  background: #eef2f7;
+  color: #c7254e;
+  padding: 0.15em 0.35em;
+  border-radius: 3px;
+  font-size: 0.88em;
+}
+
+pre code {
+  background: none;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+}
+
+.keyword { color: #b294bb; font-weight: bold; }
+.type { color: #81a2be; }
+.string { color: #b5bd68; }
+.comment { color: #707880; font-style: italic; }
+.number { color: #de935f; }
+.macro { color: #8abeb7; }
+.function { color: #5c93b5; }
+
+blockquote {
+  border-left: 4px solid #16c79a;
+  margin: 1em 0;
+  padding: 0.5em 1em;
+  background: #f0faf6;
+  color: #2d5a4a;
+}
+
+blockquote.warning {
+  border-left-color: #e74c3c;
+  background: #fdf0ef;
+  color: #6b2d2d;
+}
+
+blockquote.tip {
+  border-left-color: #f39c12;
+  background: #fef9e7;
+  color: #7d6608;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+  font-size: 0.92em;
+}
+
+th, td {
+  border: 1px solid #ddd;
+  padding: 0.5em 0.8em;
+  text-align: left;
+}
+
+th {
+  background: #f5f5f5;
+  font-weight: 600;
+}
+
+tr:nth-child(even) { background: #fafafa; }
+
+ul, ol {
+  margin: 0.5em 0 1em 1.5em;
+}
+
+li { margin-bottom: 0.3em; }
+
+.toc {
+  background: #f0f4f8;
+  border: 1px solid #d0dbe8;
+  border-radius: 6px;
+  padding: 1em 1.5em;
+  margin: 1.5em 0;
+}
+
+.toc h2 {
+  margin-top: 0;
+  font-size: 1.2rem;
+  border: none;
+  padding: 0;
+}
+
+.toc ol {
+  margin-left: 1.2em;
+}
+
+.nav {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 3em;
+  padding-top: 1.5em;
+  border-top: 2px solid #e0e0e0;
+  font-size: 0.95rem;
+}
+
+.nav a {
+  display: inline-block;
+  padding: 0.4em 1em;
+  background: #f0f4f8;
+  border: 1px solid #d0dbe8;
+  border-radius: 4px;
+  color: #0d7377;
+}
+
+.nav a:hover {
+  background: #e0ecf2;
+}
+
+.chapter-list {
+  list-style: none;
+  margin-left: 0;
+  padding: 0;
+}
+
+.chapter-list li {
+  margin-bottom: 0.8em;
+  padding: 0.6em 1em;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  transition: border-color 0.2s;
+}
+
+.chapter-list li:hover {
+  border-color: #16c79a;
+}
+
+.chapter-list a {
+  font-weight: 600;
+  font-size: 1.05rem;
+  border-bottom: none;
+}
+
+.chapter-list .desc {
+  display: block;
+  margin-top: 0.2em;
+  font-size: 0.88rem;
+  color: #555;
+  font-weight: 400;
+}
+
+.hero {
+  text-align: center;
+  padding: 3rem 0 2rem;
+  margin-bottom: 2rem;
+}
+
+.hero h1 {
+  font-size: 2.8rem;
+  border: none;
+  margin-bottom: 0.5rem;
+}
+
+.hero .subtitle {
+  font-size: 1.2rem;
+  color: #555;
+  font-style: italic;
+  margin-bottom: 1.5rem;
+}
+
+.hero .tagline {
+  font-size: 1rem;
+  color: #777;
+  max-width: 36rem;
+  margin: 0 auto;
+}
+
+.figure {
+  text-align: center;
+  margin: 1.5em 0;
+}
+
+.figure pre {
+  display: inline-block;
+  text-align: left;
+}
+
+.figure-caption {
+  font-size: 0.88rem;
+  color: #666;
+  margin-top: 0.5em;
+  font-style: italic;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid #e0e0e0;
+  margin: 2em 0;
+}

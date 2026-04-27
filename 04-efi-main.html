@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 4: EFI Main &mdash; The UEFI Boot Phase</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>4. EFI Main: The UEFI Boot Phase</h1>
+
+<p>
+This chapter covers the first half of <code>efi_main()</code>: saving
+the system table pointer, printing to the UEFI console, disabling the
+watchdog timer, and the overall life cycle of a UEFI boot application.
+The second half (GOP, memory map, ExitBootServices) is covered in
+Chapters 5 and 6.
+</p>
+
+<h2>efi_main signature</h2>
+
+<pre><code>EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle,
+                            EFI_SYSTEM_TABLE *SystemTable)
+{</code></pre>
+
+<p>
+<code>EFIAPI</code> ensures the Microsoft x64 calling convention.
+<code>ImageHandle</code> is our loaded image handle (needed later for
+<code>ExitBootServices</code> and <code>OpenProtocol</code>).
+<code>SystemTable</code> is the master table with pointers to
+everything UEFI provides.
+</p>
+
+<h2>Saving the table pointers</h2>
+
+<pre><code>static EFI_SYSTEM_TABLE *g_ST;
+static EFI_BOOT_SERVICES *g_BS;
+
+g_ST = SystemTable;
+g_BS = SystemTable-&gt;BootServices;</code></pre>
+
+<p>
+We save these as file-scope statics because every UEFI call needs one
+or the other. <code>g_ST</code> gives us console output and the
+configuration table; <code>g_BS</code> gives us memory allocation,
+protocol lookup, and ExitBootServices.
+</p>
+
+<h2>Printing to the UEFI console</h2>
+
+<p>
+UEFI's console output uses 16-bit characters (<code>CHAR16</code>).
+Our helper converts ASCII to CHAR16:
+</p>
+
+<pre><code>static void print(const char *s)
+{
+    CHAR16 buf[256];
+    int i;
+    for (i = 0; s[i] &amp;&amp; i &lt; 255; i++)
+        buf[i] = (CHAR16)s[i];
+    buf[i] = 0;
+    g_ST-&gt;ConOut-&gt;OutputString(g_ST-&gt;ConOut, buf);
+}</code></pre>
+
+<p>
+<code>OutputString</code> is a function pointer in the
+<code>ConOut</code> protocol. The first argument is always
+<code>This</code> &mdash; a pointer to the protocol instance itself
+(UEFI uses a C++-like OOP pattern).
+</p>
+
+<p>
+We also have hex and decimal printing helpers:
+</p>
+
+<pre><code>static void print_hex(uint64_t val)
+{
+    const char hex[] = "0123456789ABCDEF";
+    char buf[17];
+    int i = 0;
+    if (val == 0) { print("0"); return; }
+    char tmp[16];
+    int j = 0;
+    while (val) {
+        tmp[j++] = hex[val &amp; 0xF];
+        val &gt;&gt;= 4;
+    }
+    while (--j &gt;= 0)
+        buf[i++] = tmp[j];
+    buf[i] = '\0';
+    print(buf);
+}</code></pre>
+
+<p>
+These are simple, but they let us print status messages during boot,
+which is invaluable for debugging. Once we exit boot services, these
+functions stop working (because <code>ConOut</code> is a boot service).
+We switch to serial output at that point (Chapter 8).
+</p>
+
+<h2>Clearing the screen</h2>
+
+<pre><code>g_ST-&gt;ConOut-&gt;ClearScreen(g_ST-&gt;ConOut);</code></pre>
+
+<p>
+This clears the UEFI console and resets the cursor. It's cosmetic but
+makes our output easier to read.
+</p>
+
+<h2>The watchdog timer</h2>
+
+<pre><code>g_BS-&gt;SetWatchdogTimer(0, 0, 0, NULL);</code></pre>
+
+<p>
+UEFI firmware sets a 5-minute watchdog timer on boot applications. If
+the timer expires, the firmware resets the machine. This is a safety
+mechanism: if your bootloader hangs, the system reboots instead of
+staying frozen forever.
+</p>
+
+<p>
+We disable it by setting the timeout to 0. This is important because
+our kernel will eventually sit in an infinite loop (the idle loop), and
+we don't want the firmware to reboot us.
+</p>
+
+<h2>The boot life cycle</h2>
+
+<p>
+A UEFI boot application goes through these phases:
+</p>
+
+<ol>
+<li><strong>Boot services active</strong> &mdash; can call any function
+    in <code>EFI_BOOT_SERVICES</code> (console output, memory allocation,
+    protocol lookup, etc.)</li>
+<li><strong>Get memory map</strong> &mdash; must be done immediately
+    before exiting boot services, because any boot service call changes
+    the map</li>
+<li><strong>ExitBootServices</strong> &mdash; tells the firmware we're
+    done. After this, <strong>no boot service calls are allowed</strong>.
+    Console output, memory allocation, and protocol access all become
+    invalid.</li>
+<li><strong>Kernel mode</strong> &mdash; we're on our own. We have the
+    memory map, the framebuffer address, and raw hardware access.</li>
+</ol>
+
+<p>
+The transition from step 3 to step 4 is the most critical moment in the
+boot. Once we call <code>ExitBootServices</code>, we can never go back.
+We must have gathered all the information we need <em>before</em> that
+call.
+</p>
+
+<h2>What we gather before exiting</h2>
+
+<ul>
+<li><strong>Framebuffer info</strong> &mdash; base address, size,
+    resolution, pixel format (via GOP, Chapter 5)</li>
+<li><strong>Memory map</strong> &mdash; which memory regions are
+    available, reserved, or MMIO (Chapter 6)</li>
+<li><strong>RSDP address</strong> &mdash; the ACPI table pointer (for
+    future use; hardware enumeration)</li>
+</ul>
+
+<p>
+All of this goes into a <code>struct boot_info</code> that we pass to
+<code>kernel_main()</code>.
+</p>
+
+<h2>The boot_info structure</h2>
+
+<pre><code>struct boot_info {
+    struct framebuffer_info fb;
+    uint64_t rsdp_addr;
+    uint64_t kernel_virtual_base;
+    uint64_t kernel_physical_base;
+    uint64_t kernel_size;
+    uint64_t total_memory;
+    uint32_t num_memory_map_entries;
+    uint32_t reserved;
+};</code></pre>
+
+<p>
+The <code>kernel_virtual_base</code>, <code>kernel_physical_base</code>,
+and <code>kernel_size</code> fields are for when we set up higher-half
+kernel addressing in the future. For now they're zero.
+</p>
+
+<div class="nav">
+<a href="03-entry.html">&larr; 3. The Boot Entry &amp; ABI Bridge</a>
+<a href="05-gop.html">5. The Graphics Output Protocol &rarr;</a>
+</div>
+
+</body>
+</html>

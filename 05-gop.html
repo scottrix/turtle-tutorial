@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 5: The Graphics Output Protocol</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>5. The Graphics Output Protocol</h1>
+
+<p>
+Before we exit boot services, we need the framebuffer address. UEFI
+provides this through the Graphics Output Protocol (GOP). GOP tells us
+the resolution, pixel format, and the physical address of the linear
+framebuffer.
+</p>
+
+<h2>The LocateProtocol problem</h2>
+
+<p>
+The obvious way to get a protocol is <code>LocateProtocol</code>:
+</p>
+
+<pre><code>EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
+EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+status = g_BS-&gt;LocateProtocol(&amp;gop_guid, NULL, (void **)&amp;gop);</code></pre>
+
+<p>
+This should work. In practice, with OVMF (the open-source UEFI firmware
+for QEMU), it returns <code>EFI_INVALID_PARAMETER</code> for
+<strong>every</strong> GUID &mdash; not just GOP. We verified the
+calling convention and GUID bytes in disassembly. The root cause is
+unknown; it may be an OVMF bug or a subtle interaction with the
+relocator.
+</p>
+
+<h2>The workaround: LocateHandle + OpenProtocol</h2>
+
+<p>
+Instead of asking the firmware to find the protocol and return a
+pointer, we can:
+</p>
+
+<ol>
+<li>Call <code>LocateHandle</code> to get a list of all handles that
+    support the GOP GUID</li>
+<li>Call <code>OpenProtocol</code> on each handle to get the protocol
+    interface pointer</li>
+</ol>
+
+<p>
+This two-step approach works perfectly. Here's the implementation:
+</p>
+
+<pre><code>static EFI_STATUS get_gop(EFI_HANDLE ImageHandle,
+                           EFI_GRAPHICS_OUTPUT_PROTOCOL **gop_out)
+{
+    EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    UINTN buf_sz = sizeof(EFI_HANDLE) * 16;
+    EFI_HANDLE handles[16];
+    EFI_STATUS status;
+
+    status = g_BS-&gt;LocateHandle(2, &amp;gop_guid, NULL, &amp;buf_sz, handles);
+    if (EFI_ERROR(status))
+        return status;
+
+    UINTN num = buf_sz / sizeof(EFI_HANDLE);
+    for (UINTN h = 0; h &lt; num; h++) {
+        void *iface = NULL;
+        status = g_BS-&gt;OpenProtocol(handles[h], &amp;gop_guid,
+                                      &amp;iface, ImageHandle, NULL,
+                                      EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+        if (!EFI_ERROR(status) &amp;&amp; iface) {
+            *gop_out = (EFI_GRAPHICS_OUTPUT_PROTOCOL *)iface;
+            return EFI_SUCCESS;
+        }
+    }
+    return EFI_NOT_FOUND;
+}</code></pre>
+
+<p>
+Let's break this down:
+</p>
+
+<ul>
+<li><code>LocateHandle(2, ...)</code> &mdash; the <code>2</code> is
+    <code>ByProtocol</code>, meaning "find all handles that support this
+    GUID". The function fills <code>handles[]</code> and sets
+    <code>buf_sz</code> to the actual size written.</li>
+<li><code>OpenProtocol</code> &mdash; asks the firmware to give us the
+    protocol interface for a specific handle. We pass
+    <code>ImageHandle</code> as the <code>AgentHandle</code> (required
+    by the spec) and <code>EFI_OPEN_PROTOCOL_GET_PROTOCOL</code> as the
+    attribute (read-only access).</li>
+<li>We try each handle until one succeeds. In practice there's usually
+    just one GOP handle.</li>
+</ul>
+
+<h2>Reading the framebuffer info</h2>
+
+<p>
+Once we have the GOP interface, we read the mode information:
+</p>
+
+<pre><code>if (!EFI_ERROR(status) &amp;&amp; gop) {
+    fb_info.base_addr = gop-&gt;Mode-&gt;FrameBufferBase;
+    fb_info.size      = gop-&gt;Mode-&gt;FrameBufferSize;
+    fb_info.width     = gop-&gt;Mode-&gt;Info-&gt;HorizontalResolution;
+    fb_info.height    = gop-&gt;Mode-&gt;Info-&gt;VerticalResolution;
+    fb_info.pitch     = gop-&gt;Mode-&gt;Info-&gt;PixelsPerScanLine * 4;
+    fb_info.bpp       = 32;</code></pre>
+
+<p>
+<code>gop-&gt;Mode</code> points to the current mode structure, which
+contains the framebuffer base address (a physical memory address we can
+write pixels to), its size, and a pointer to the mode info.
+</p>
+
+<p>
+<code>pitch</code> is the number of bytes per scanline. UEFI gives us
+<code>PixelsPerScanLine</code>, and since each pixel is 32 bits (4
+bytes), we multiply by 4. The pitch may be larger than
+<code>width * 4</code> if the hardware has padding at the end of each
+line.
+</p>
+
+<h2>Pixel formats</h2>
+
+<p>
+UEFI defines two main pixel formats:
+</p>
+
+<ul>
+<li><code>PixelRedGreenBlueReserved8BitPerColor</code> &mdash; byte
+    order is R, G, B, reserved. The first byte at a pixel address is
+    red.</li>
+<li><code>PixelBlueGreenRedReserved8BitPerColor</code> &mdash; byte
+    order is B, G, R, reserved. The first byte is blue. This is the
+    most common format on x86 hardware.</li>
+</ul>
+
+<p>
+We detect the format and set the color shift values accordingly:
+</p>
+
+<pre><code>if (gop-&gt;Mode-&gt;Info-&gt;PixelFormat ==
+    PixelBlueGreenRedReserved8BitPerColor) {
+    fb_info.red_shift   = 16;
+    fb_info.green_shift = 8;
+    fb_info.blue_shift  = 0;
+} else {
+    fb_info.red_shift   = 0;
+    fb_info.green_shift = 8;
+    fb_info.blue_shift  = 16;
+}</code></pre>
+
+<p>
+These shift values are used later by the framebuffer driver to compose
+pixel colors. A pixel value of <code>0x00RRGGBB</code> (or
+<code>0x00BBGGRR</code> depending on format) is written directly to
+the framebuffer memory.
+</p>
+
+<h2>Why this matters after ExitBootServices</h2>
+
+<p>
+After we exit boot services, GOP is gone. We can't call
+<code>QueryMode</code> or <code>SetMode</code>. But the
+<strong>framebuffer memory is still there</strong> &mdash; it's a
+region of physical memory that the GPU reads from to display pixels.
+As long as we know the base address, resolution, and pitch, we can
+write pixels directly. That's exactly what our framebuffer console
+driver does (Chapter 9).
+</p>
+
+<div class="nav">
+<a href="04-efi-main.html">&larr; 4. EFI Main: The UEFI Boot Phase</a>
+<a href="06-memory-ebs.html">6. Memory Map &amp; ExitBootServices &rarr;</a>
+</div>
+
+</body>
+</html>

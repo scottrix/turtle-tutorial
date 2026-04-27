@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 12: What's Next</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>12. What's Next</h1>
+
+<p>
+At this point, we have a bootable 64-bit kernel that:
+</p>
+
+<ul>
+<li>Boots via UEFI with no external bootloaders</li>
+<li>Owns the GDT with a TSS (ready for interrupt handling)</li>
+<li>Writes to both a framebuffer console and a serial port</li>
+<li>Knows the memory map and framebuffer layout</li>
+</ul>
+
+<p>
+That's a solid foundation. Here's what comes next, in approximate
+order of dependency:
+</p>
+
+<h2>1. Page tables</h2>
+
+<p>
+We're currently running on UEFI's identity-mapped page tables. These
+map virtual address 0&ndash;4GB (and possibly more) 1:1 to physical
+memory. This works for now, but we need our own page tables to:
+</p>
+
+<ul>
+<li>Identity-map low memory (0&ndash;1MB) for I/O port access and
+    BIOS/ACPI structures</li>
+<li>Map the framebuffer at a known virtual address</li>
+<li>Set up a higher-half kernel (map the kernel to
+    <code>0xFFFFFFFF80000000</code> or similar)</li>
+<li>Eventually implement per-process address spaces</li>
+</ul>
+
+<p>
+The first step is a simple identity map of the first 4GB using 2MB
+huge pages (so we only need a P4ML4 + a few PDPT entries + a few PD
+entries, not thousands of page table entries).
+</p>
+
+<h2>2. IDT and interrupt handling</h2>
+
+<p>
+We disabled interrupts with <code>cli</code> after ExitBootServices.
+Before we can handle exceptions (page faults, general protection
+faults, etc.) or hardware interrupts (keyboard, timer, disk), we need
+to:
+</p>
+
+<ul>
+<li>Set up an Interrupt Descriptor Table (IDT) with 256 entries</li>
+<li>Write assembly stubs that save registers, call a C handler, and
+    restore registers</li>
+<li>Remap the PIC (or switch to APIC)</li>
+<li>Enable interrupts with <code>sti</code></li>
+</ul>
+
+<h2>3. Physical memory allocator</h2>
+
+<p>
+We have the memory map from UEFI, but no way to allocate and free
+pages. A buddy allocator or a simple bitmap allocator would let us:
+</p>
+
+<ul>
+<li>Allocate pages for page tables</li>
+<li>Allocate memory for kernel data structures</li>
+<li>Eventually implement <code>kmalloc</code> and <code>kfree</code></li>
+</ul>
+
+<h2>4. Kernel heap</h2>
+
+<p>
+Once we have a page allocator, we can build a slab or dlmalloc-style
+heap on top of it. This gives us <code>kmalloc</code> for arbitrary-size
+allocations.
+</p>
+
+<h2>5. Keyboard input</h2>
+
+<p>
+With the IDT in place, we can handle keyboard interrupts (IRQ1 on the
+PIC, or the keyboard driver via APIC). This gives us interactive input
+on the framebuffer console.
+</p>
+
+<h2>6. Timer and scheduling</h2>
+
+<p>
+The Programmable Interval Timer (PIT) or HPET can generate periodic
+interrupts. Once we have timer interrupts, we can implement cooperative
+or preemptive multitasking: save the current thread's register state,
+switch to the next thread, restore its state, and resume.
+</p>
+
+<h2>7. Disk I/O and filesystem</h2>
+
+<p>
+We need to read from disk (virtio-blk in QEMU) and implement at least
+a simple filesystem (FAT32 is a good start &mdash; UEFI already uses
+it, and the spec is simple). This is a prerequisite for loading
+user programs.
+</p>
+
+<h2>8. User mode and syscalls</h2>
+
+<p>
+With page tables and the TSS already in place, we can:
+</p>
+
+<ul>
+<li>Create user-mode page tables (ring 3)</li>
+<li>Use <code>sysret</code>/<code>syscall</code> for fast
+    kernel entry/exit</li>
+<li>Implement a syscall interface (read, write, open, close, exec,
+    fork, etc.)</li>
+</ul>
+
+<h2>9. Porting PCC</h2>
+
+<p>
+The long-term goal is for Turtle OS to be self-hosting: able to
+compile its own kernel. We've chosen PCC (Portable C Compiler) as the
+compiler to port because:
+</p>
+
+<ul>
+<li>It supports <code>__attribute__((ms_abi))</code> (TCC doesn't)</li>
+<li>It targets C11</li>
+<li>It's relatively small (~50K lines of code)</li>
+<li>It's BSD-licensed</li>
+</ul>
+
+<p>
+PCC currently compiles 5 of our 6 kernel source files (the 6th uses an
+inline assembly constraint that PCC doesn't support). The next steps
+for PCC are:
+</p>
+
+<ul>
+<li>Fix the <code>"Nd"</code> constraint issue</li>
+<li>Make PCC output Turtle OS object files (ELF, with our ABI)</li>
+<li>Port PCC's runtime support (cpp, assembler linker) to run on
+    Turtle OS</li>
+</ul>
+
+<h2>The road ahead</h2>
+
+<p>
+OS development is an iterative process. Each layer builds on the last.
+The boot chain we've built here &mdash; UEFI entry, GOP, memory map,
+EBS, GDT, kernel_main &mdash; is the foundation for everything that
+follows. Every feature listed above depends on having a working boot
+and basic console output.
+</p>
+
+<p>
+Good luck, and have fun.
+</p>
+
+<div class="nav">
+<a href="11-pitfalls.html">&larr; 11. Lessons Learned &amp; Pitfalls</a>
+<a href="index.html">Table of Contents</a>
+</div>
+
+</body>
+</html>
