@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 14: The IDT &amp; Exception Handling</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>14. The IDT &amp; Exception Handling</h1>
+
+<p>
+With page tables active, the next critical piece is the Interrupt
+Descriptor Table (IDT). Without it, any CPU exception (page fault,
+general protection fault, divide error) causes a <strong>triple
+fault</strong> &mdash; the CPU resets with no diagnostic output. With
+an IDT, we can catch exceptions, dump register state, and either
+recover or halt cleanly.
+</p>
+
+<h2>What is the IDT?</h2>
+
+<p>
+The IDT is an array of 256 descriptors, each 16 bytes in 64-bit mode.
+The CPU uses the interrupt vector number (0&ndash;255) as an index into
+the IDT to find the handler address. There are three types:
+</p>
+
+<ul>
+<li><strong>Interrupt gates</strong> (type 0xE) &mdash; disable
+    interrupts on entry (IF is cleared)</li>
+<li><strong>Trap gates</strong> (type 0xF) &mdash; leave interrupts
+    enabled (used for breakpoints, int 3)</li>
+<li><strong>Task gates</strong> &mdash; hardware task switch (not used
+    in 64-bit mode)</li>
+</ul>
+
+<h2>IDT entry layout (64-bit)</h2>
+
+<pre><code>Bytes 0-1:   Offset[15:0]        (low 16 bits of handler address)
+Byte 2:      Segment Selector    (our code segment: 0x08)
+Byte 3:      IST                  (Interrupt Stack Table offset, 0 = none)
+Byte 4:      Type Attributes     (Present, DPL, Gate Type)
+Bytes 5-6:   Offset[31:16]       (mid 16 bits)
+Bytes 7-10:  Offset[63:32]       (high 32 bits)
+Bytes 11-15: Reserved            (must be zero)</code></pre>
+
+<p>
+The handler address is split across three fields (low, mid, high). The
+segment selector tells the CPU which code segment the handler runs in
+&mdash; we use our kernel code selector <code>0x08</code>.
+</p>
+
+<h2>CPU exceptions: vectors 0&ndash;31</h2>
+
+<p>
+The Intel architecture reserves vectors 0&ndash;31 for CPU exceptions:
+</p>
+
+<table>
+<tr><th>Vector</th><th>Name</th><th>Type</th><th>Error Code?</th></tr>
+<tr><td>0</td><td>Division Error</td><td>Fault</td><td>No</td></tr>
+<tr><td>6</td><td>Invalid Opcode</td><td>Fault</td><td>No</td></tr>
+<tr><td>8</td><td>Double Fault</td><td>Abort</td><td>Yes (0)</td></tr>
+<tr><td>13</td><td>General Protection</td><td>Fault</td><td>Yes</td></tr>
+<tr><td>14</td><td>Page Fault</td><td>Fault</td><td>Yes</td></tr>
+</table>
+
+<p>
+Some exceptions push an error code onto the stack; others don't. Our
+assembly stubs handle this by pushing a fake <code>0</code> for
+exceptions that don't push one, so the stack frame is uniform.
+</p>
+
+<h2>The assembly stubs</h2>
+
+<p>
+Each ISR (Interrupt Service Routine) is a tiny assembly stub that:
+</p>
+
+<ol>
+<li>Pushes a dummy error code (0) if the CPU doesn't push one</li>
+<li>Pushes the vector number</li>
+<li>Jumps to the common handler</li>
+</ol>
+
+<pre><code>.macro ISR_NOERR n
+.global isr\n
+isr\n:
+    push $0          /* fake error code */
+    push $\n         /* vector number */
+    jmp isr_common
+.endm
+
+.macro ISR_ERR n
+.global isr\n
+isr\n:
+    push $\n         /* CPU already pushed error code */
+    jmp isr_common
+.endm</code></pre>
+
+<p>
+Exceptions that push error codes (8, 10&ndash;14, 17, 21, 29, 30) use
+<code>ISR_ERR</code>; all others use <code>ISR_NOERR</code>.
+</p>
+
+<h2>The common handler</h2>
+
+<p>
+The common handler saves all general-purpose registers, calls the C
+function, then restores everything and returns:
+</p>
+
+<pre><code>isr_common:
+    push %r15 ... push %rax    /* save all 15 GP registers */
+
+    mov %rsp, %rdi             /* first arg = pointer to frame */
+    call exception_handler     /* C handler */
+
+    pop %rax ... pop %r15      /* restore registers */
+    add $16, %rsp              /* remove error code + vector number */
+    iretq                      /* return from interrupt */</code></pre>
+
+<p>
+<code>iretq</code> pops RIP, CS, RFLAGS, RSP, and SS from the stack
+(the CPU pushed these before entering the handler). This restores the
+exact pre-interrupt state.
+</p>
+
+<h2>The interrupt frame struct</h2>
+
+<pre><code>struct interrupt_frame {
+    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
+    uint64_t rdi, rsi, rbp, rdx, rcx, rbx, rax;
+    uint64_t int_no, error_code;
+    uint64_t rip, cs, rflags, rsp, ss;
+};</code></pre>
+
+<p>
+This matches the stack layout when <code>exception_handler</code> is
+called. The C handler receives a pointer to this struct as its first
+argument (in RDI, per System V ABI).
+</p>
+
+<h2>The C exception handler</h2>
+
+<pre><code>void exception_handler(struct interrupt_frame *frame)
+{
+    serial_puts("\n=== EXCEPTION ");
+    print_hex(frame-&gt;int_no);
+    serial_puts(": ");
+    serial_puts(exception_names[frame-&gt;int_no]);
+    serial_puts(" ===\n");
+
+    if (frame-&gt;error_code != 0) {
+        serial_puts("Error code: 0x");
+        print_hex(frame-&gt;error_code);
+    }
+
+    serial_puts("RIP=0x"); print_hex(frame-&gt;rip);
+    serial_puts(" RFLAGS=0x"); print_hex(frame-&gt;rflags);
+
+    if (frame-&gt;int_no == 14) {
+        uint64_t cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        serial_puts("CR2 (fault address): 0x");
+        print_hex(cr2);
+    }
+
+    /* Fatal exceptions halt the CPU */
+    if (frame-&gt;int_no == 8 || frame-&gt;int_no == 18 || ...)
+        for (;;) __asm__ volatile("cli; hlt");
+}</code></pre>
+
+<p>
+For page faults (vector 14), we also read CR2, which contains the
+faulting virtual address. This is essential for debugging: "page fault
+at CR2=0xDEADBEEF, error_code=3" tells you exactly what happened.
+</p>
+
+<h2>The PIC and IRQ handling</h2>
+
+<p>
+Hardware interrupts (IRQs 0&ndash;15) arrive at vectors 32&ndash;47.
+After handling an IRQ, we must send an <strong>EOI</strong> (End of
+Interrupt) to the PIC (Programmable Interrupt Controller). Without
+this, the PIC won't deliver further interrupts:
+</p>
+
+<pre><code>/* Send EOI to PIC */
+if (frame-&gt;int_no &gt;= 32 &amp;&amp; frame-&gt;int_no &lt; 48) {
+    if (frame-&gt;int_no &gt;= 40)
+        outb(0x20, 0xA0);   /* slave PIC */
+    outb(0x20, 0x20);       /* master PIC */
+}</code></pre>
+
+<p>
+IRQs 8&ndash;15 come through the slave PIC (cascaded on IRQ 2). Both
+PICs need EOI for those interrupts.
+</p>
+
+<h2>Setting TSS RSP0</h2>
+
+<p>
+When an interrupt fires while running in ring 3, the CPU switches to
+the stack pointer in <code>TSS.RSP0</code> before calling the IDT
+handler. We must set this to a valid kernel stack:
+</p>
+
+<pre><code>static uint8_t kernel_stack[16384] __attribute__((aligned(16)));
+struct tss_entry *tss = gdt_get_tss();
+tss-&gt;rsp[0] = (uint64_t)&amp;kernel_stack[sizeof(kernel_stack)];</code></pre>
+
+<p>
+We point RSP0 to the <em>top</em> of the stack array because x86
+stacks grow downward. The 16KB size is generous; 8KB is typical for
+kernel interrupt stacks.
+</p>
+
+<h2>Loading the IDT</h2>
+
+<pre><code>idt_init();    /* fill all 256 entries */
+idt_load();    /* lidt instruction */
+__asm__ volatile("sti");  /* enable interrupts */</code></pre>
+
+<p>
+<code>lidt</code> loads the IDT pointer (limit + base address), just
+like <code>lgdt</code> does for the GDT. After this, the CPU uses our
+IDT for all exceptions and interrupts.
+</p>
+
+<div class="nav">
+<a href="13-paging.html">&larr; 13. Page Tables</a>
+<a href="index.html">Table of Contents</a>
+</div>
+
+</body>
+</html>
