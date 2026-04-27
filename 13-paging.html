@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 13: Page Tables &amp; Identity Mapping</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>13. Page Tables &amp; Identity Mapping</h1>
+
+<p>
+After exiting boot services, our kernel runs on UEFI's page tables.
+These are an identity map set up by the firmware, and they work &mdash;
+but we don't control them. We need our own page tables to:
+</p>
+
+<ul>
+<li>Know exactly what is mapped and where</li>
+<li>Map the framebuffer (which may be at a high address like
+    <code>0x80000000</code>)</li>
+<li>Later implement higher-half kernel and per-process address spaces</li>
+<li>Enable NX (No-Execute) bits for security</li>
+</ul>
+
+<h2>x86_64 paging overview</h2>
+
+<p>
+In 64-bit long mode, paging uses a 4-level hierarchy:
+</p>
+
+<pre><code>Virtual Address (48 bits used)
+┌──────────┬──────────┬──────────┬──────────┬──────────────┐
+│ PML4 idx │ PDPT idx │  PD idx  │  PT idx  │ Page offset   │
+│  9 bits  │  9 bits  │  9 bits  │  9 bits  │   12 bits     │
+└──────────┴──────────┴──────────┴──────────┴──────────────┘
+
+Level 4: PML4  (Page Map Level 4) &mdash; 512 entries, 8 bytes each = 4KB
+Level 3: PDPT  (Page Directory Pointer Table) &mdash; 512 entries
+Level 2: PD    (Page Directory) &mdash; 512 entries
+Level 1: PT    (Page Table) &mdash; 512 entries</code></pre>
+
+<p>
+Each entry is 8 bytes. The low 12 bits are flags; the remaining bits
+are the physical address of the next-level table (or the final page).
+All tables must be 4KB-aligned.
+</p>
+
+<h2>2MB huge pages</h2>
+
+<p>
+If we use 4KB pages, we need 5 levels of tables to map even 1GB:
+one PML4, one PDPT, one PD, one PT per 2MB, and the pages themselves.
+That's a lot of memory just for page tables.
+</p>
+
+<p>
+Instead, we use <strong>2MB huge pages</strong>. By setting the PS
+(Page Size) bit (bit 7) in a Page Directory entry, the CPU treats the
+entry as a 2MB page instead of a pointer to a Page Table. This
+eliminates one level:
+</p>
+
+<pre><code>PML4 &rarr; PDPT &rarr; PD &rarr; 2MB page (no PT needed)</code></pre>
+
+<p>
+With 2MB pages, a single PD (512 entries &times; 2MB = 1GB) maps a
+full gigabyte. To map 4GB, we need just one PML4, one PDPT, and four
+PD tables: 6 tables &times; 4KB = 24KB of page tables.
+</p>
+
+<h2>Page table entry flags</h2>
+
+<table>
+<tr><th>Bit</th><th>Name</th><th>Meaning</th></tr>
+<tr><td>0</td><td>Present</td><td>Page is present in memory</td></tr>
+<tr><td>1</td><td>R/W</td><td>Read/Write (0 = read-only)</td></tr>
+<tr><td>2</td><td>U/S</td><td>User/Supervisor (0 = ring 0 only)</td></tr>
+<tr><td>5</td><td>Accessed</td><td>Set by CPU when page is read</td></tr>
+<tr><td>7</td><td>PS (Huge)</td><td>Page size: 1 = huge page in PD entry</td></tr>
+<tr><td>63</td><td>NX</td><td>No-Execute (prevent code execution)</td></tr>
+</table>
+
+<h2>The page_table struct</h2>
+
+<pre><code>struct page_table {
+    uint64_t entries[512];
+} __attribute__((packed, aligned(4096)));</code></pre>
+
+<p>
+The <code>aligned(4096)</code> attribute is critical: the hardware
+ignores the low 12 bits of the address in a page table entry (those
+bits are flags). If a table is not 4KB-aligned, the hardware will
+interpret the misaligned address bits as flags, causing silent
+corruption.
+</p>
+
+<h2>Our mapping strategy</h2>
+
+<p>
+We create two PDPT entries and two PD tables:
+</p>
+
+<ul>
+<li><strong>PML4[0]</strong> &rarr; PDPT[0] &rarr; PD[0] &rarr; 512
+    2MB pages mapping 0&ndash;1GB (identity map)</li>
+<li><strong>PML4[0] PDPT[1]</strong> or <strong>PDPT[fb_pdpt_idx]</strong>
+    &rarr; PD[1] &rarr; 2MB pages mapping the framebuffer region</li>
+<li><strong>PML4[256]</strong> &rarr; same as PML4[0] (higher-half
+    mirror, for future use)</li>
+</ul>
+
+<p>
+The key challenge: the framebuffer address
+(<code>0x80000000</code> = 2GB) falls in PDPT entry 1 (0x80000000
+&divide; 512GB = 0, but within PDPT[0], it's PD entry 1:
+0x80000000 &divide; 1GB = 2, so PD index = 2). We map it within
+the first PDPT's PD entry range.
+</p>
+
+<h2>Mapping a 2MB page</h2>
+
+<pre><code>static void map_2mb_page(struct page_table *pd, int idx,
+                          uint64_t phys, uint64_t flags)
+{
+    pd-&gt;entries[idx] = (phys &amp; 0xFFFFFFFFFFE00000ULL) | flags;
+}</code></pre>
+
+<p>
+The mask <code>0xFFFFFFFFFFE00000</code> extracts bits 21&ndash;51,
+which is the physical address aligned to 2MB. The flags (Present,
+Writable, Huge, etc.) fill the low bits.
+</p>
+
+<h2>Initializing the page tables</h2>
+
+<pre><code>void paging_init(uint64_t fb_base, uint64_t fb_size)
+{
+    memset(&amp;pml4, 0, sizeof(pml4));
+    memset(pdpt, 0, sizeof(pdpt));
+    memset(pd, 0, sizeof(pd));
+
+    pml4.entries[0] = (uint64_t)&amp;pdpt[0] | PTE_PRESENT | PTE_WRITABLE;
+    pml4.entries[256] = pml4.entries[0];  /* higher-half mirror */
+
+    pdpt[0].entries[0] = (uint64_t)&amp;pd[0] | PTE_PRESENT | PTE_WRITABLE;
+
+    /* Identity map 0-1GB using 512 2MB pages */
+    for (int i = 0; i &lt; 512; i++) {
+        uint64_t phys = (uint64_t)i * HUGEPAGE_SIZE;
+        map_2mb_page(&amp;pd[0], i, phys,
+                     PTE_PRESENT | PTE_WRITABLE | PTE_HUGE | PTE_ACCESSED);
+    }
+
+    /* Map framebuffer region in a second PD */
+    if (fb_base != 0 &amp;&amp; fb_base &lt; (1ULL &lt;&lt; 39)) {
+        int fb_pd_idx = pd_index(fb_base);
+        if (fb_pd_idx &gt; 0) {
+            pdpt[0].entries[fb_pd_idx] =
+                (uint64_t)&amp;pd[1] | PTE_PRESENT | PTE_WRITABLE;
+            for (int i = 0; i &lt; 512; i++) {
+                uint64_t phys = (uint64_t)fb_pd_idx * (1ULL &lt;&lt; 30)
+                              + (uint64_t)i * HUGEPAGE_SIZE;
+                map_2mb_page(&amp;pd[1], i, phys,
+                             PTE_PRESENT | PTE_WRITABLE | PTE_HUGE
+                             | PTE_ACCESSED | PTE_NX);
+            }
+        }
+    }
+}</code></pre>
+
+<p>
+We mark the framebuffer pages with <code>PTE_NX</code>
+(No-Execute) because the framebuffer is data, not code. This is a
+security best practice: if an attacker can write to the framebuffer,
+they shouldn't be able to execute what they wrote.
+</p>
+
+<h2>Loading the page tables</h2>
+
+<p>
+<code>paging_load()</code> configures the CPU to use our page tables.
+We must set several control registers and an MSR:
+</p>
+
+<pre><code>void paging_load(void)
+{
+    uint64_t cr4, efer;
+
+    /* Enable PAE (Physical Address Extension) and PSE (Page Size Extension) */
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= CR4_PAE | CR4_PSE;
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+
+    /* Set EFER.LME (Long Mode Enable) and EFER.NXE (No-Execute Enable) */
+    __asm__ volatile("mov $0xC0000080, %%rcx\n\t"
+                     "rdmsr\n\t"
+                     "shl $32, %%rdx\n\t"
+                     "or %%rdx, %%rax\n\t"
+                     : "=a"(efer) : : "rcx", "rdx");
+    efer |= EFER_LME | EFER_NXE;
+    __asm__ volatile("mov $0xC0000080, %%rcx\n\t"
+                     "mov %0, %%rax\n\t"
+                     "mov %%rax, %%rdx\n\t"
+                     "shr $32, %%rdx\n\t"
+                     "wrmsr\n\t"
+                     : : "r"(efer) : "rax", "rcx", "rdx");
+
+    /* Load our PML4 address into CR3 */
+    __asm__ volatile("mov %0, %%cr3" : : "r"((uint64_t)&amp;pml4));
+
+    /* Enable paging (CR0.PG = bit 31) and write-protect (CR0.WP = bit 16) */
+    uint64_t cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |= CR0_WP;
+    cr0 |= (uint64_t)1 &lt;&lt; 31;
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+}</code></pre>
+
+<p>
+Important: we're already in 64-bit long mode (UEFI set that up), so
+the CPU is already using some page tables. We're just replacing them
+with our own. The CR0.PG bit is already set; writing it again is
+harmless. The key steps are: set CR3 (our PML4 address), enable
+PAE/PSE features, and set NX in EFER.
+</p>
+
+<blockquote class="tip">
+If we were transitioning from 32-bit protected mode to long mode,
+the order would matter: set CR4.PAE first, then EFER.LME, then CR3,
+then CR0.PG. Since UEFI already did this, our <code>paging_load</code>
+just swaps the page tables and adds features (NX).
+</blockquote>
+
+<h2>The higher-half mirror</h2>
+
+<pre><code>pml4.entries[256] = pml4.entries[0];</code></pre>
+
+<p>
+PML4 entry 256 covers virtual addresses
+<code>0xFFFF800000000000</code>&ndash;<code>0xFFFF80FFFFFFFFF</code>
+(the "negative" address space in canonical form). By mirroring entry 0
+here, we create a higher-half alias of the same memory. When we later
+move the kernel to a higher-half address, this mapping will be the
+primary one.
+</p>
+
+<h2>What this gives us</h2>
+
+<ul>
+<li><strong>Identity-mapped first 1GB</strong> &mdash; all code, data,
+    stack, and low-memory hardware structures are accessible</li>
+<li><strong>Framebuffer mapped</strong> &mdash; the GOP framebuffer
+    (at 0x80000000 or wherever) is writable, with NX set</li>
+<li><strong>NX bit enabled</strong> &mdash; the framebuffer and future
+    data-only mappings are non-executable</li>
+<li><strong>Higher-half ready</strong> &mdash; PML4[256] mirrors the
+    low mapping, ready for kernel relocation</li>
+<li><strong>Full control</strong> &mdash; we know every mapping; no
+    surprises from UEFI's page tables</li>
+</ul>
+
+<div class="nav">
+<a href="12-whats-next.html">&larr; 12. What's Next</a>
+<a href="index.html">Table of Contents</a>
+</div>
+
+</body>
+</html>
