@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 15: Hardware Interrupts &mdash; PIC, PIT, and Keyboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>15. Hardware Interrupts &mdash; PIC, PIT, and Keyboard</h1>
+
+<p>
+With the IDT loaded and exceptions handled, we can now enable hardware
+interrupts. This chapter covers the three pieces that make this work:
+remapping the <strong>PIC</strong> (Programmable Interrupt Controller)
+so IRQs don't collide with CPU exceptions, programming the
+<strong>PIT</strong> (Programmable Interval Timer) to generate periodic
+ticks, and writing a <strong>keyboard driver</strong> that reads
+scancodes from the PS/2 controller.
+</p>
+
+<h2>The 8259 PIC</h2>
+
+<p>
+The 8259 PIC is the legacy interrupt controller on x86. In a PC, two
+PIC chips are cascaded: a <strong>master</strong> (IRQs 0&ndash;7) and
+a <strong>slave</strong> (IRQs 8&ndash;15, cascaded on the master's
+IRQ 2). By default, the BIOS maps IRQs 0&ndash;15 to INT 8&ndash;15,
+which collides with CPU exceptions (double fault, GPF, page fault).
+We must <strong>remap</strong> the PIC to use vectors 32&ndash;47,
+which are safely above the reserved exception vectors.
+</p>
+
+<h3>PIC I/O ports</h3>
+
+<table>
+<tr><th>Port</th><th>Function</th></tr>
+<tr><td><code>0x20</code></td><td>Master PIC Command</td></tr>
+<tr><td><code>0x21</code></td><td>Master PIC Data (mask)</td></tr>
+<tr><td><code>0xA0</code></td><td>Slave PIC Command</td></tr>
+<tr><td><code>0xA1</code></td><td>Slave PIC Data (mask)</td></tr>
+</table>
+
+<h3>PIC initialization sequence</h3>
+
+<p>
+The PIC is initialized with four <strong>ICW</strong> (Initialization
+Command Words), written sequentially to the command port. Between
+writes, we do an I/O wait (writing to port <code>0x80</code>) to give
+the slow PIC time to process:
+</p>
+
+<pre><code>void pic_init(void)
+{
+/* Mask all IRQs first */
+outb(0xFF, PIC_MASTER_DATA);
+outb(0xFF, PIC_SLAVE_DATA);
+
+/* ICW1: Start initialization in cascade mode */
+outb(ICW1_INIT | ICW1_ICW4, PIC_MASTER_CMD);
+io_wait();
+outb(ICW1_INIT | ICW1_ICW4, PIC_SLAVE_CMD);
+io_wait();
+
+/* ICW2: Vector offsets - master at 0x20, slave at 0x28 */
+outb(0x20, PIC_MASTER_DATA);
+io_wait();
+outb(0x28, PIC_SLAVE_DATA);
+io_wait();
+
+/* ICW3: Cascade wiring - master has slave on IRQ2,
+          slave has cascade identity 2 */
+outb(0x04, PIC_MASTER_DATA);
+io_wait();
+outb(0x02, PIC_SLAVE_DATA);
+io_wait();
+
+/* ICW4: 8086 mode */
+outb(ICW4_8086, PIC_MASTER_DATA);
+io_wait();
+outb(ICW4_8086, PIC_SLAVE_DATA);
+io_wait();
+
+/* Mask all IRQs again (will unmask selectively later) */
+outb(0xFF, PIC_MASTER_DATA);
+outb(0xFF, PIC_SLAVE_DATA);
+}</code></pre>
+
+<p>
+After this, IRQ 0 fires as <code>INT 0x20</code>, IRQ 1 as
+<code>INT 0x21</code>, and so on up to IRQ 15 at
+<code>INT 0x2F</code>. These map to our IDT entries 32&ndash;47.
+</p>
+
+<h3>EOI (End of Interrupt)</h3>
+
+<p>
+After handling an IRQ, you <strong>must</strong> send an EOI to the
+PIC, or it will never deliver another interrupt. For IRQs 8&ndash;15
+(which come through the slave), you must send EOI to <em>both</em>
+PICs:
+</p>
+
+<pre><code>void pic_eoi(uint8_t irq)
+{
+if (irq >= 8)
+outb(0x20, PIC_SLAVE_CMD);   /* slave first */
+outb(0x20, PIC_MASTER_CMD);   /* then master */
+}</code></pre>
+
+<h3>Masking and unmasking IRQs</h3>
+
+<p>
+Each PIC has an 8-bit interrupt mask register. A set bit means the
+corresponding IRQ is <em>masked</em> (disabled). We unmask only the
+IRQs we need:
+</p>
+
+<pre><code>void pic_unmask(uint8_t irq)
+{
+uint16_t port;
+if (irq < 8)
+port = PIC_MASTER_DATA;
+else {
+port = PIC_SLAVE_DATA;
+irq -= 8;
+}
+uint8_t value = inb(port) & ~(1 << irq);
+outb(value, port);
+}</code></pre>
+
+<h2>The PIT (Programmable Interval Timer)</h2>
+
+<p>
+The 8254 PIT is a simple timer that generates interrupts on IRQ 0 at
+a configurable frequency. The base clock is approximately 1.193182 MHz
+(<code>1193182</code> Hz). We set a 16-bit divisor; the output
+frequency is <code>1193182 / divisor</code>.
+</p>
+
+<h3>PIT I/O ports</h3>
+
+<table>
+<tr><th>Port</th><th>Function</th></tr>
+<tr><td><code>0x40</code></td><td>Channel 0 data (the one that generates IRQ 0)</td></tr>
+<tr><td><code>0x43</code></td><td>Command register</td></tr>
+</table>
+
+<h3>Initializing the PIT</h3>
+
+<pre><code>#define PIT_FREQ 1193182
+
+void pit_init(uint32_t freq)
+{
+uint16_t divisor = (uint16_t)(PIT_FREQ / freq);
+
+outb(0x36, PIT_COMMAND);           /* channel 0, lobyte/hibyte, mode 3 */
+outb((uint8_t)(divisor & 0xFF), PIT_CHANNEL0);    /* low byte */
+outb((uint8_t)((divisor >> 8) & 0xFF), PIT_CHANNEL0); /* high byte */
+}</code></pre>
+
+<p>
+Mode 3 is "square wave generator" &mdash; it toggles the output, which
+is what we want for a periodic timer. With <code>freq = 100</code>,
+the divisor is <code>11931</code> and we get 100 ticks per second.
+</p>
+
+<h3>The tick counter</h3>
+
+<pre><code>static volatile uint64_t pit_ticks = 0;
+
+void pit_handler(void)
+{
+pit_ticks++;
+}
+
+uint64_t pit_get_ticks(void)
+{
+return pit_ticks;
+}</code></pre>
+
+<p>
+The handler is called from our <code>exception_handler</code> when
+<code>int_no == 32</code> (IRQ 0). The <code>volatile</code> qualifier
+ensures the compiler re-reads the variable each time, even in a loop.
+</p>
+
+<h2>The PS/2 Keyboard</h2>
+
+<p>
+The PS/2 keyboard controller sends <strong>scancodes</strong> on IRQ 1
+(INT 0x21). When a key is pressed, the controller sends a "make"
+scancode; when released, it sends a "break" scancode (make code with
+bit 7 set). We read the scancode from port <code>0x60</code>:
+</p>
+
+<pre><code>#define KEYBOARD_DATA 0x60
+
+void keyboard_handler(void)
+{
+uint8_t scancode = inb(KEYBOARD_DATA);
+
+/* Ignore break codes (bit 7 set) */
+if (scancode & 0x80)
+return;
+
+/* Convert to ASCII if we have a mapping */
+if (scancode < 128) {
+char c = scancode_to_ascii[scancode];
+if (c) {
+kb_buffer[kb_write_pos & 0xFF] = c;
+kb_write_pos++;
+}
+}
+}</code></pre>
+
+<h3>Scancode to ASCII table</h3>
+
+<p>
+The PS/2 keyboard sends "set 1" scancodes by default. Here is the
+lookup table for US keyboard layout (make codes only):
+</p>
+
+<pre><code>static const char scancode_to_ascii[128] = {
+0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
+'\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
+0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,
+'*', 0, ' '
+};</code></pre>
+
+<h3>The ring buffer</h3>
+
+<p>
+The keyboard handler runs in interrupt context and must return quickly.
+We store incoming characters in a circular ring buffer and let the
+kernel's main loop consume them at its leisure:
+</p>
+
+<pre><code>static volatile char kb_buffer[256];
+static volatile uint32_t kb_write_pos = 0;
+static volatile uint32_t kb_read_pos = 0;
+
+char keyboard_get_char(void)
+{
+if (kb_read_pos == kb_write_pos)
+return 0;
+char c = kb_buffer[kb_read_pos & 0xFF];
+kb_read_pos++;
+return c;
+}
+
+int keyboard_has_char(void)
+{
+return kb_read_pos != kb_write_pos;
+}</code></pre>
+
+<p>
+The 256-byte buffer wraps naturally via the <code>&amp; 0xFF</code>
+mask. The 32-bit positions never wrap to each other accidentally,
+so the "empty" check (<code>read == write</code>) works correctly.
+</p>
+
+<h2>Wiring it all together</h2>
+
+<p>
+In <code>efi_main.c</code>, after loading the IDT, we initialize the
+PIC, PIT, and keyboard, then unmask the IRQs we want:
+</p>
+
+<pre><code>idt_init();
+idt_load();
+
+pic_init();           /* remap IRQs to INT 32-47 */
+pit_init(100);        /* 100 Hz timer */
+keyboard_init();
+
+pic_unmask(0);        /* enable IRQ 0 (timer) */
+pic_unmask(1);        /* enable IRQ 1 (keyboard) */
+
+__asm__ volatile("sti");  /* enable CPU interrupts */</code></pre>
+
+<h2>The exception handler with IRQ dispatch</h2>
+
+<p>
+Our <code>exception_handler</code> now dispatches hardware IRQs to
+their respective handlers and sends EOI:
+</p>
+
+<pre><code>void exception_handler(struct interrupt_frame *frame)
+{
+if (frame->int_no >= 32 && frame->int_no < 48) {
+irq_handler((uint8_t)(frame->int_no - 32));
+pic_eoi((uint8_t)(frame->int_no - 32));
+} else if (frame->int_no < 32) {
+/* CPU exception - halt */
+for (;;)
+__asm__ volatile("cli; hlt");
+}
+}
+
+static void irq_handler(uint8_t irq)
+{
+switch (irq) {
+case 0: pit_handler(); break;
+case 1: keyboard_handler(); break;
+}
+}</code></pre>
+
+<h2>The kernel main loop</h2>
+
+<p>
+With interrupts enabled, the kernel main loop can now respond to
+timer ticks and keyboard input:
+</p>
+
+<pre><code>uint64_t last_ticks = 0;
+for (;;) {
+uint64_t ticks = pit_get_ticks();
+if (ticks != last_ticks && (ticks % 100 == 0)) {
+serial_puts("Tick: ");
+serial_put_dec(ticks);
+serial_puts("\n");
+last_ticks = ticks;
+}
+if (keyboard_has_char()) {
+char c = keyboard_get_char();
+serial_out(c);
+}
+__asm__ volatile("hlt");  /* sleep until next interrupt */
+}</code></pre>
+
+<p>
+The <code>hlt</code> instruction halts the CPU until the next
+interrupt arrives, saving power. Each timer tick wakes the CPU,
+and we check if a full second has elapsed (every 100 ticks). Keyboard
+input is echoed to the serial port as it arrives.
+</p>
+
+<h2>Running it</h2>
+
+<p>
+Build and run the OS. You should see the timer counting seconds
+on the serial output:
+</p>
+
+<pre><code>$ make efi-run
+Boot services exited
+Turtle OS kernel_main reached!
+Kernel initialized.
+Tick: 100
+Tick: 200
+Tick: 300
+...</code></pre>
+
+<p>
+If you type in the QEMU window, characters are echoed to the serial
+port. The OS is now responding to the outside world &mdash; it's
+alive!
+</p>
+
+<h2>A note on the -fpic GOT trap</h2>
+
+<p>
+This chapter's code works because we learned a painful lesson in
+Chapter 14: with <code>-fpic</code>, storing function pointers in a
+local array copies <strong>unrelocated</strong> values from
+<code>.data</code>. Each handler must be read individually via the
+GOT to get the correct runtime address. The same principle applies
+to any global function pointer in a PIC binary &mdash; if you need
+the runtime address, read it through the GOT, not from a copied
+array.
+</p>
+
+<div class="nav">
+<a href="14-idt.html">&larr; 14. The IDT &amp; Exception Handling</a>
+<a href="index.html">Table of Contents</a>
+</div>
+
+</body>
+</html>

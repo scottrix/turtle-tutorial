@@ -29,28 +29,49 @@ the IDT to find the handler address. There are three types:
 
 <ul>
 <li><strong>Interrupt gates</strong> (type 0xE) &mdash; disable
-    interrupts on entry (IF is cleared)</li>
+interrupts on entry (IF is cleared)</li>
 <li><strong>Trap gates</strong> (type 0xF) &mdash; leave interrupts
-    enabled (used for breakpoints, int 3)</li>
+enabled (used for breakpoints, int 3)</li>
 <li><strong>Task gates</strong> &mdash; hardware task switch (not used
-    in 64-bit mode)</li>
+in 64-bit mode)</li>
 </ul>
 
 <h2>IDT entry layout (64-bit)</h2>
 
-<pre><code>Bytes 0-1:   Offset[15:0]        (low 16 bits of handler address)
-Byte 2:      Segment Selector    (our code segment: 0x08)
-Byte 3:      IST                  (Interrupt Stack Table offset, 0 = none)
-Byte 4:      Type Attributes     (Present, DPL, Gate Type)
-Bytes 5-6:   Offset[31:16]       (mid 16 bits)
-Bytes 7-10:  Offset[63:32]       (high 32 bits)
-Bytes 11-15: Reserved            (must be zero)</code></pre>
+<pre><code>Bytes 0-1:  Offset[15:0]  (low 16 bits of handler address)
+Byte 2:    Segment Selector (our code segment: 0x08)
+Byte 3:    IST (Interrupt Stack Table offset, 0 = none)
+Byte 4:    Type Attributes (Present, DPL, Gate Type)
+Bytes 5-6: Offset[31:16] (mid 16 bits)
+Bytes 7-10: Offset[63:32] (high 32 bits)
+Bytes 11-15: Reserved (must be zero)</code></pre>
 
 <p>
 The handler address is split across three fields (low, mid, high). The
 segment selector tells the CPU which code segment the handler runs in
 &mdash; we use our kernel code selector <code>0x08</code>.
 </p>
+
+<h2>The type_attr byte</h2>
+
+<p>
+Byte 4 of each IDT entry is the type/attributes byte, with this bit
+layout:
+</p>
+
+<pre><code>Bit 7:    Present (1 = handler is valid)
+Bits 6-5: DPL (Descriptor Privilege Level, 0 = kernel only)
+Bits 4-0: Gate type (0x0E = interrupt, 0x0F = trap)</code></pre>
+
+<p>
+Common values:
+</p>
+
+<table>
+<tr><th>Constant</th><th>Value</th><th>Meaning</th></tr>
+<tr><td><code>IDT_PRESENT | IDT_INTERRUPT | IDT_DPL0</code></td><td><code>0x8E</code></td><td>Kernel interrupt gate</td></tr>
+<tr><td><code>IDT_PRESENT | IDT_TRAP | IDT_DPL3</code></td><td><code>0xEF</code></td><td>User-accessible trap gate (for int 3)</td></tr>
+</table>
 
 <h2>CPU exceptions: vectors 0&ndash;31</h2>
 
@@ -88,16 +109,16 @@ Each ISR (Interrupt Service Routine) is a tiny assembly stub that:
 <pre><code>.macro ISR_NOERR n
 .global isr\n
 isr\n:
-    push $0          /* fake error code */
-    push $\n         /* vector number */
-    jmp isr_common
+push $0          /* fake error code */
+push $\n         /* vector number */
+jmp isr_common
 .endm
 
 .macro ISR_ERR n
 .global isr\n
 isr\n:
-    push $\n         /* CPU already pushed error code */
-    jmp isr_common
+push $\n         /* CPU already pushed error code */
+jmp isr_common
 .endm</code></pre>
 
 <p>
@@ -113,14 +134,19 @@ function, then restores everything and returns:
 </p>
 
 <pre><code>isr_common:
-    push %r15 ... push %rax    /* save all 15 GP registers */
+push %r15
+push %r14
+...
+push %rax          /* save all 15 GP registers */
 
-    mov %rsp, %rdi             /* first arg = pointer to frame */
-    call exception_handler     /* C handler */
+mov %rsp, %rdi     /* first arg = pointer to frame */
+call exception_handler  /* C handler */
 
-    pop %rax ... pop %r15      /* restore registers */
-    add $16, %rsp              /* remove error code + vector number */
-    iretq                      /* return from interrupt */</code></pre>
+pop %rax
+...
+pop %r15           /* restore registers */
+add $16, %rsp      /* remove error code + vector number */
+iretq              /* return from interrupt */</code></pre>
 
 <p>
 <code>iretq</code> pops RIP, CS, RFLAGS, RSP, and SS from the stack
@@ -128,77 +154,94 @@ function, then restores everything and returns:
 exact pre-interrupt state.
 </p>
 
-<h2>The interrupt frame struct</h2>
+<h2>The interrupt frame struct &mdash; field order matters!</h2>
+
+<p>
+The struct fields must match the <em>push order</em> in the assembly
+stub. Since <code>push %rax</code> is the last push, <code>rax</code>
+is at the <em>lowest</em> address (offset 0) on the stack. C structs
+lay out fields in declaration order from low to high address, so
+<code>rax</code> must be <em>first</em>:
+</p>
 
 <pre><code>struct interrupt_frame {
-    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
-    uint64_t rdi, rsi, rbp, rdx, rcx, rbx, rax;
-    uint64_t int_no, error_code;
-    uint64_t rip, cs, rflags, rsp, ss;
+uint64_t rax, rbx, rcx, rdx, rbp, rsi, rdi;
+uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
+uint64_t int_no, error_code;
+uint64_t rip, cs, rflags, rsp, ss;
 };</code></pre>
 
 <p>
-This matches the stack layout when <code>exception_handler</code> is
-called. The C handler receives a pointer to this struct as its first
-argument (in RDI, per System V ABI).
+<strong>Warning:</strong> If you reverse the struct order (r15 first,
+rax last), the handler will read garbage values for all registers.
+This is one of the most common IDT bugs &mdash; the push order and
+the struct declaration order must be opposites (last pushed = first
+in the struct).
 </p>
 
-<h2>The C exception handler</h2>
+<h2>Writing IDT entries in pure assembly</h2>
 
-<pre><code>void exception_handler(struct interrupt_frame *frame)
+<p>
+Under UEFI, our kernel is compiled with <code>-fpic</code> (position-
+independent code). This creates a subtle trap: if we store handler
+function pointers in a local array, the compiler copies them from
+the <code>.data</code> section via <code>rep movsq</code> &mdash;
+but the <code>.data</code> source has <strong>unrelocated</strong>
+ELF virtual addresses. The properly relocated addresses live in the
+GOT (Global Offset Table), which the UEFI PE loader fixes up. When
+the compiler reads from the local array copy, it gets the wrong
+values.
+</p>
+
+<p>
+The fix: <strong>don't use a local array</strong>. Instead, pass each
+handler directly to a function that reads it via the GOT:
+</p>
+
+<pre><code>static void idt_set_entry(int idx, void *handler, uint8_t type_attr)
 {
-    serial_puts("\n=== EXCEPTION ");
-    print_hex(frame-&gt;int_no);
-    serial_puts(": ");
-    serial_puts(exception_names[frame-&gt;int_no]);
-    serial_puts(" ===\n");
+volatile void *entry = (volatile void *)(IDT_PHYS_ADDR + idx * 16);
+volatile uint64_t h = (uint64_t)(uintptr_t)handler;
+idt_set_entry_asm((void *)entry, h, type_attr);
+}
 
-    if (frame-&gt;error_code != 0) {
-        serial_puts("Error code: 0x");
-        print_hex(frame-&gt;error_code);
-    }
-
-    serial_puts("RIP=0x"); print_hex(frame-&gt;rip);
-    serial_puts(" RFLAGS=0x"); print_hex(frame-&gt;rflags);
-
-    if (frame-&gt;int_no == 14) {
-        uint64_t cr2;
-        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
-        serial_puts("CR2 (fault address): 0x");
-        print_hex(cr2);
-    }
-
-    /* Fatal exceptions halt the CPU */
-    if (frame-&gt;int_no == 8 || frame-&gt;int_no == 18 || ...)
-        for (;;) __asm__ volatile("cli; hlt");
-}</code></pre>
+/* Each call forces a GOT-relative read of the handler address */
+idt_set_entry(0, isr0, IDT_PRESENT | IDT_INTERRUPT | IDT_DPL0);
+idt_set_entry(1, isr1, IDT_PRESENT | IDT_INTERRUPT | IDT_DPL0);
+/* ... */</code></pre>
 
 <p>
-For page faults (vector 14), we also read CR2, which contains the
-faulting virtual address. This is essential for debugging: "page fault
-at CR2=0xDEADBEEF, error_code=3" tells you exactly what happened.
+The <code>volatile uint64_t h</code> forces the compiler to do a full
+64-bit GOT read for each handler address. The <code>idt_set_entry_asm</code>
+function is written in pure assembly to reliably split the 64-bit
+handler address into the IDT entry's offset_low, offset_mid, and
+offset_high fields:
 </p>
 
-<h2>The PIC and IRQ handling</h2>
-
-<p>
-Hardware interrupts (IRQs 0&ndash;15) arrive at vectors 32&ndash;47.
-After handling an IRQ, we must send an <strong>EOI</strong> (End of
-Interrupt) to the PIC (Programmable Interrupt Controller). Without
-this, the PIC won't deliver further interrupts:
-</p>
-
-<pre><code>/* Send EOI to PIC */
-if (frame-&gt;int_no &gt;= 32 &amp;&amp; frame-&gt;int_no &lt; 48) {
-    if (frame-&gt;int_no &gt;= 40)
-        outb(0x20, 0xA0);   /* slave PIC */
-    outb(0x20, 0x20);       /* master PIC */
-}</code></pre>
-
-<p>
-IRQs 8&ndash;15 come through the slave PIC (cascaded on IRQ 2). Both
-PICs need EOI for those interrupts.
-</p>
+<pre><code>idt_set_entry_asm:
+/* rdi = entry address, rsi = handler, dl = type_attr */
+mov %rsi, %rax
+mov %rsi, %rcx
+shr $16, %rax
+shr $32, %rcx
+movb %sil, (%rdi)       /* offset[7:0] */
+shr $8, %rsi
+movb %sil, 1(%rdi)      /* offset[15:8] */
+movw $0x0008, 2(%rdi)   /* segment selector */
+movb $0x00, 4(%rdi)     /* IST */
+movb %dl, 5(%rdi)       /* type_attr */
+movb %al, 6(%rdi)       /* offset[23:16] */
+shr $8, %rax
+movb %al, 7(%rdi)       /* offset[31:24] */
+movb %cl, 8(%rdi)       /* offset[39:32] */
+shr $8, %rcx
+movb %cl, 9(%rdi)       /* offset[47:40] */
+shr $8, %rcx
+movb %cl, 10(%rdi)      /* offset[55:48] */
+shr $8, %rcx
+movb %cl, 11(%rdi)      /* offset[63:56] */
+movq $0, 12(%rdi)       /* reserved */
+ret</code></pre>
 
 <h2>Setting TSS RSP0</h2>
 
@@ -210,19 +253,22 @@ handler. We must set this to a valid kernel stack:
 
 <pre><code>static uint8_t kernel_stack[16384] __attribute__((aligned(16)));
 struct tss_entry *tss = gdt_get_tss();
-tss-&gt;rsp[0] = (uint64_t)&amp;kernel_stack[sizeof(kernel_stack)];</code></pre>
+uint64_t kstack_top = (uint64_t)&amp;kernel_stack[sizeof(kernel_stack)];
+tss-&gt;rsp[0] = kstack_top;
+__asm__ volatile("mov %0, %%rsp" : : "r"(kstack_top));</code></pre>
 
 <p>
 We point RSP0 to the <em>top</em> of the stack array because x86
-stacks grow downward. The 16KB size is generous; 8KB is typical for
-kernel interrupt stacks.
+stacks grow downward. We also switch RSP to this kernel stack, since
+after ExitBootServices and the GDT reload, we need a known-good stack
+for interrupt handling.
 </p>
 
 <h2>Loading the IDT</h2>
 
-<pre><code>idt_init();    /* fill all 256 entries */
-idt_load();    /* lidt instruction */
-__asm__ volatile("sti");  /* enable interrupts */</code></pre>
+<pre><code>idt_init();                    /* fill all 256 entries */
+idt_load();                    /* lidt instruction */
+__asm__ volatile("sti");       /* enable interrupts */</code></pre>
 
 <p>
 <code>lidt</code> loads the IDT pointer (limit + base address), just
@@ -232,7 +278,7 @@ IDT for all exceptions and interrupts.
 
 <div class="nav">
 <a href="13-paging.html">&larr; 13. Page Tables</a>
-<a href="index.html">Table of Contents</a>
+<a href="15-interrupts.html">15. Hardware Interrupts &rarr;</a>
 </div>
 
 </body>
