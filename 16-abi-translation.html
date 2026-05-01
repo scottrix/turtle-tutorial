@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter 16: The ABI Translation Layer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>16. The ABI Translation Layer</h1>
+
+<p>
+In earlier chapters, we used <code>__attribute__((ms_abi))</code> to let
+GCC handle the ABI difference between our C code (System V AMD64) and UEFI
+firmware functions (Microsoft x64). This worked, but it created a
+dependency on a GCC-specific extension. If we want our OS to be compilable
+with other compilers &mdash; specifically PCC (Portable C Compiler), which
+does not support <code>__attribute__((ms_abi))</code> &mdash; we need a
+different approach.
+</p>
+
+<p>
+This chapter presents the solution: a pure-assembly ABI translation layer
+that sits between our C code and UEFI. No C function in the entire codebase
+needs <code>EFIAPI</code> or <code>__attribute__((ms_abi))</code>. The
+compiler doesn't need to know about the Microsoft calling convention at all.
+</p>
+
+<div class="toc">
+<h2>Contents</h2>
+<ol>
+<li><a href="#the-problem">The Problem</a></li>
+<li><a href="#the-solution">The Solution: Assembly Wrappers</a></li>
+<li><a href="#register-mapping">Register Mapping</a></li>
+<li><a href="#shadow-space">Shadow Space and Stack Alignment</a></li>
+<li><a href="#efi-call-0-3">efi_call0 through efi_call3</a></li>
+<li><a href="#efi-call-4">efi_call4: Four Register Arguments</a></li>
+<li><a href="#efi-call-5">efi_call5: Five Arguments with Stack</a></li>
+<li><a href="#efi-call-6">efi_call6: Six Arguments with Stack</a></li>
+<li><a href="#efi-entry">The Entry Point: _efi_entry</a></li>
+<li><a href="#efi-h-changes">Changes to efi.h</a></li>
+<li><a href="#efi-main-changes">Changes to efi_main.c</a></li>
+<li><a href="#bugs-we-hit">Bugs We Hit</a></li>
+</ol>
+</div>
+
+<h2 id="the-problem">The Problem</h2>
+
+<p>
+UEFI firmware functions expect to be called with the Microsoft x64 ABI:
+</p>
+
+<table>
+<tr><th>Arg #</th><th>MS ABI Register</th><th>SysV ABI Register</th></tr>
+<tr><td>1st</td><td>rcx</td><td>rdi</td></tr>
+<tr><td>2nd</td><td>rdx</td><td>rsi</td></tr>
+<tr><td>3rd</td><td>r8</td><td>rdx</td></tr>
+<tr><td>4th</td><td>r9</td><td>rcx</td></tr>
+<tr><td>5th+</td><td>stack</td><td>stack</td></tr>
+</table>
+
+<p>
+Additionally, the MS ABI requires 32 bytes of <strong>shadow space</strong>
+on the stack (for the callee to optionally spill the four register
+arguments), and the stack must be 16-byte aligned at the point of the
+<code>call</code> instruction.
+</p>
+
+<p>
+With <code>__attribute__((ms_abi))</code>, GCC generates all the register
+shuffling and shadow space allocation automatically. But this is a GCC
+extension. PCC doesn't support it. If we want to self-host with PCC
+someday, we need an alternative.
+</p>
+
+<h2 id="the-solution">The Solution: Assembly Wrappers</h2>
+
+<p>
+Instead of annotating C functions with <code>EFIAPI</code>, we write
+assembly wrappers that:
+</p>
+
+<ol>
+<li>Receive arguments in the System V ABI convention (rdi, rsi, rdx,
+rcx, r8, r9, stack)</li>
+<li>Shuffle the registers into the Microsoft x64 convention (rcx, rdx,
+r8, r9)</li>
+<li>Allocate shadow space and align the stack</li>
+<li>Move stack arguments to their correct MS ABI positions</li>
+<li>Call the UEFI function pointer</li>
+<li>Return the result (rax is the same in both ABIs)</li>
+</ol>
+
+<p>
+We provide one wrapper per argument count: <code>efi_call0</code> through
+<code>efi_call6</code>. The C header declares them like this:
+</p>
+
+<pre><code>#ifndef TURTLE_EFI_CALL_H
+#define TURTLE_EFI_CALL_H
+
+#include &lt;kernel/types.h&gt;
+
+uint64_t efi_call0(void *func);
+uint64_t efi_call1(void *func, void *a1);
+uint64_t efi_call2(void *func, void *a1, void *a2);
+uint64_t efi_call3(void *func, void *a1, void *a2, void *a3);
+uint64_t efi_call4(void *func, void *a1, void *a2, void *a3, void *a4);
+uint64_t efi_call5(void *func, void *a1, void *a2, void *a3, void *a4, void *a5);
+uint64_t efi_call6(void *func, void *a1, void *a2, void *a3, void *a4, void *a5, void *a6);
+
+#endif</code></pre>
+
+<p>
+All arguments are <code>void *</code>. This is deliberate: the assembly
+code treats every argument as a 64-bit value and passes it in a register or
+on the stack. The C caller casts as needed.
+</p>
+
+<h2 id="register-mapping">Register Mapping</h2>
+
+<p>
+The core of every wrapper is the register shuffle. Our C code calls
+<code>efi_callN(func, a1, a2, ...)</code>. In the System V ABI, the
+arguments arrive as:
+</p>
+
+<table>
+<tr><th>Argument</th><th>SysV Register</th><th>MS ABI Target</th></th></tr>
+<tr><td>func</td><td>rdi</td><td>used by <code>call *%rdi</code></td></tr>
+<tr><td>a1</td><td>rsi</td><td>rcx</td></tr>
+<tr><td>a2</td><td>rdx</td><td>rdx (already there!)</td></tr>
+<tr><td>a3</td><td>rcx</td><td>r8</td></tr>
+<tr><td>a4</td><td>r8</td><td>r9</td></tr>
+<tr><td>a5</td><td>r9</td><td>stack [rsp+0x20]</td></tr>
+<tr><td>a6</td><td>stack [rsp+0x08]</td><td>stack [rsp+0x28]</td></tr>
+</table>
+
+<blockquote class="tip">
+Note that <strong>a2 is already in the right register</strong> (rdx).
+The SysV ABI and MS ABI both use rdx for the 2nd argument. This saves us
+one move in every wrapper.
+</blockquote>
+
+<p>
+The register shuffle must be done in the right order to avoid clobbering.
+For <code>efi_call3</code>, we need a3 (in rcx) to go to r8, and a1 (in
+rsi) to go to rcx. If we move rsi to rcx first, we lose a3. So we move
+a3 first:
+</p>
+
+<pre><code>mov %rcx, %r8    /* a3 → R8 (must happen before rcx is overwritten) */
+mov %rsi, %rcx   /* a1 → RCX */</code></pre>
+
+<p>
+For <code>efi_call4</code>, the chain is longer: a4 (r8) → r9,
+a3 (rcx) → r8, a1 (rsi) → rcx. Again, we must move from the
+<em>end</em> of the chain first:
+</p>
+
+<pre><code>mov %r8, %r9    /* a4 → R9 (r8 is source, r9 is destination) */
+mov %rcx, %r8   /* a3 → R8 (rcx still has original a3) */
+mov %rsi, %rcx  /* a1 → RCX */</code></pre>
+
+<blockquote class="warning">
+<strong>The MS ABI register order is RCX, RDX, R8, R9</strong> &mdash;
+not RCX, RDX, R9, R8 as we initially assumed. This mistake caused
+efi_call3 to put the 3rd argument into R9 (the 4th-argument slot)
+instead of R8 (the 3rd-argument slot). The result: AllocatePool wrote
+the allocated pointer to the wrong location, and our memory_map pointer
+stayed NULL. We spent hours debugging this before realizing the register
+order was wrong.
+</blockquote>
+
+<h2 id="shadow-space">Shadow Space and Stack Alignment</h2>
+
+<p>
+The Microsoft x64 ABI has two stack requirements:
+</p>
+
+<ol>
+<li><strong>Shadow space</strong>: The caller must reserve 32 bytes
+(4 &times; 8) on the stack before the <code>call</code>, even if
+the function takes fewer than 4 arguments. This space is at
+<code>[rsp+0x08]</code> through <code>[rsp+0x27]</code> from the
+callee's perspective (after the return address is pushed).</li>
+<li><strong>16-byte alignment</strong>: The stack must be 16-byte
+aligned at the point of the <code>call</code> instruction (i.e.,
+the value of rsp just before <code>call</code> must be a multiple
+of 16).</li>
+</ol>
+
+<p>
+When our wrapper is entered, the stack looks like this:
+</p>
+
+<pre><code>[rsp]        = return address (pushed by the caller's call instruction)
+[rsp+0x08]   = a6 (for efi_call6)
+[rsp+0x10]   = caller's stuff
+...</code></pre>
+
+<p>
+Since the caller's rsp was 16-byte aligned before calling us, and
+<code>call</code> pushes 8 bytes, our entry rsp is <strong>16n+8</strong>
+(8 mod 16). To get back to 16-byte alignment before our own
+<code>call</code>, we need to subtract an amount that makes rsp
+congruent to 16n+8 minus our_subtraction equal to 16m+8 (so that after
+<code>call</code> pushes 8 bytes, rsp = 16m).
+</p>
+
+<p>
+For wrappers with no stack arguments (efi_call0 through efi_call4):
+</p>
+
+<pre><code>/* entry rsp = 16n+8 */
+sub $0x28, %rsp   /* rsp = 16n+8-40 = 16m+8; 40 mod 16 = 8 */
+call *%rdi        /* pushes ret addr: rsp = 16m ✓ aligned */</code></pre>
+
+<p>
+Wait &mdash; for efi_call4, we only need 32 bytes (0x20) of shadow
+space, not 40 (0x28). With 0 args on the stack, we subtract 0x28 to
+get both shadow space and alignment. With efi_call4 (still no stack
+args), we subtract 0x20. Let's verify:
+</p>
+
+<pre><code>/* entry rsp = 16n+8 */
+sub $0x20, %rsp   /* rsp = 16n+8-32 = 16m+8; 32 mod 16 = 0, so 16n+8-32 = 16(n-2)+8 */
+call *%rdi        /* pushes ret addr: rsp = 16m ✓ aligned */</code></pre>
+
+<p>
+That works too. The extra 8 bytes in efi_call0-3's sub $0x28 doesn't
+hurt &mdash; it just wastes 8 bytes of stack. We use $0x28 for
+efi_call0-3 and $0x20 for efi_call4 for consistency.
+</p>
+
+<h2 id="efi-call-0-3">efi_call0 through efi_call3</h2>
+
+<p>
+For 0 to 3 arguments, all arguments fit in registers. We just need
+shadow space and the register shuffle:
+</p>
+
+<pre><code>.global efi_call0
+efi_call0:
+	sub $0x28, %rsp
+	call *%rdi
+	add $0x28, %rsp
+	ret
+
+.global efi_call1
+efi_call1:
+	sub $0x28, %rsp
+	mov %rsi, %rcx        /* a1 → RCX */
+	call *%rdi
+	add $0x28, %rsp
+	ret
+
+.global efi_call2
+efi_call2:
+	sub $0x28, %rsp
+	mov %rsi, %rcx        /* a1 → RCX, a2 already in RDX */
+	call *%rdi
+	add $0x28, %rsp
+	ret
+
+.global efi_call3
+efi_call3:
+	sub $0x28, %rsp
+	mov %rcx, %r8         /* a3 → R8 (move before rcx is clobbered) */
+	mov %rsi, %rcx        /* a1 → RCX */
+	call *%rdi
+	add $0x28, %rsp
+	ret</code></pre>
+
+<p>
+Note how efi_call2 doesn't touch rdx at all &mdash; the 2nd argument
+is already in the correct register.
+</p>
+
+<h2 id="efi-call-4">efi_call4: Four Register Arguments</h2>
+
+<p>
+With four arguments, all still fit in registers. We need the full
+register chain shuffle:
+</p>
+
+<pre><code>.global efi_call4
+efi_call4:
+	sub $0x20, %rsp
+	mov %r8, %r9          /* a4 → R9 */
+	mov %rcx, %r8         /* a3 → R8 */
+	mov %rsi, %rcx        /* a1 → RCX */
+	call *%rdi
+	add $0x20, %rsp
+	ret</code></pre>
+
+<p>
+Example: <code>efi_call4(g_BS-&gt;SetWatchdogTimer, 0, 0, 0, NULL)</code>
+puts 0 in rcx, 0 in rdx, 0 in r8, and NULL in r9. The UEFI function
+receives exactly what it expects.
+</p>
+
+<h2 id="efi-call-5">efi_call5: Five Arguments with Stack</h2>
+
+<p>
+With five arguments, the 5th argument goes on the stack. This is where
+things get tricky. The MS ABI expects the 5th argument at
+<code>[rsp+0x28]</code> from the callee's perspective (after the return
+address is pushed by <code>call</code>), which is
+<code>[rsp+0x20]</code> from the caller's perspective (before
+<code>call</code>).
+</p>
+
+<p>
+We use a frame pointer approach: push rbp, save rsp into rbp, push the
+5th argument, then allocate shadow space:
+</p>
+
+<pre><code>.global efi_call5
+efi_call5:
+	push %rbp
+	mov %rsp, %rbp
+	push %r9              /* a5: push 5th arg onto stack */
+	sub $0x20, %rsp       /* shadow space (32 bytes) */
+	mov %r8, %r9          /* a4 → R9 */
+	mov %rcx, %r8         /* a3 → R8 */
+	mov %rsi, %rcx        /* a1 → RCX */
+	call *%rdi
+	leave                 /* restore rsp from rbp, pop rbp */
+	ret</code></pre>
+
+<p>
+Let's trace the stack layout. After <code>push %rbp; mov %rsp,%rbp;
+push %r9; sub $0x20,%rsp</code>, and then <code>call *%rdi</code>:
+</p>
+
+<pre><code>/* Before call, rsp = entry_rsp - 8(rbp) - 8(a5) - 0x20(shadow) = entry_rsp - 0x30 */
+/* After call pushes ret addr, callee rsp = entry_rsp - 0x38 */
+
+/* Callee sees:                                              */
+/*   [rsp+0x00] = return address                             */
+/*   [rsp+0x08..0x27] = shadow space (32 bytes)              */
+/*   [rsp+0x28] = 5th argument                               */
+
+/* The push of a5 landed at [entry_rsp - 0x10] = [rbp - 8]  */
+/* = [callee rsp + 0x28]  ✓  */</code></pre>
+
+<p>
+The 5th argument is exactly where the callee expects it. And the stack
+is 16-byte aligned: entry rsp was 16n+8, we subtracted 0x30 (48 bytes),
+so pre-call rsp = 16n+8-48 = 16(n-3)+8. After <code>call</code>
+pushes 8 bytes: rsp = 16(n-3). Aligned.
+</p>
+
+<p>
+We use <code>leave</code> for cleanup, which is equivalent to
+<code>mov %rbp, %rsp; pop %rbp</code>. This restores the stack
+regardless of how much shadow space or how many pushes we did.
+</p>
+
+<h2 id="efi-call-6">efi_call6: Six Arguments with Stack</h2>
+
+<p>
+With six arguments, both the 5th and 6th go on the stack. We can't
+simply push both, because the alignment and position must be exact.
+Instead, we allocate all the space at once with <code>sub</code> and
+<code>mov</code> the stack arguments into place:
+</p>
+
+<pre><code>.global efi_call6
+efi_call6:
+	push %rbp
+	mov %rsp, %rbp
+	sub $0x38, %rsp       /* 0x20 shadow + 0x10 for two stack args + 0x08 alignment */
+	mov %r8, %r9          /* a4 → R9 */
+	mov %rcx, %r8         /* a3 → R8 */
+	mov %rsi, %rcx        /* a1 → RCX */
+	mov 0x10(%rbp), %rax  /* a6: read from caller's stack (via frame pointer) */
+	mov %rax, 0x20(%rsp)  /* a6 → [RSP+0x20] (5th arg position from caller) */
+	mov %r9, 0x28(%rsp)   /* a5 → [RSP+0x28] (6th arg position from caller) */
+	call *%rdi
+	leave
+	ret</code></pre>
+
+<h3>Where is the 6th argument?</h3>
+
+<p>
+The 6th argument arrives on the stack from our C caller. When
+<code>efi_call6</code> is entered, the stack looks like:
+</p>
+
+<pre><code>[rsp+0x00] = return address (from caller's call to efi_call6)
+[rsp+0x08] = a6 (7th value on the stack: func, a1..a5 in regs, a6 on stack)</code></pre>
+
+<p>
+After <code>push %rbp</code>, rsp decreases by 8. So the old rsp was
+<code>rbp + 8</code>. The 6th argument was at <code>[old rsp + 0x08]</code>
+= <code>[rbp + 0x10]</code>. That's why we read it with
+<code>mov 0x10(%rbp), %rax</code>.
+</p>
+
+<h3>Stack argument positions</h3>
+
+<p>
+After <code>sub $0x38, %rsp</code>, the stack before <code>call</code>
+looks like:
+</p>
+
+<pre><code>[rsp+0x00..0x1F] = shadow space (32 bytes)
+[rsp+0x20]       = 5th argument (from callee perspective: [callee_rsp+0x28])
+[rsp+0x28]       = 6th argument (from callee perspective: [callee_rsp+0x30])</code></pre>
+
+<p>
+After <code>call *%rdi</code> pushes the return address, the callee
+sees its 5th argument at <code>[rsp+0x28]</code> and 6th at
+<code>[rsp+0x30]</code> &mdash; exactly as the MS ABI specifies.
+</p>
+
+<h3>Alignment</h3>
+
+<p>
+Entry rsp = 16n+8. After push rbp (8 bytes) and sub $0x38 (56 bytes):
+rsp = 16n+8-8-56 = 16n-56 = 16(n-4)+8-8 = 16(n-4). Wait &mdash;
+16n+8-64 = 16(n-4)+8. After call pushes 8: 16(n-4). Aligned.
+</p>
+
+<h2 id="efi-entry">The Entry Point: _efi_entry</h2>
+
+<p>
+The same ABI translation is needed at the entry point. UEFI firmware
+calls our PE entry point with the MS ABI (ImageHandle in rcx,
+SystemTable in rdx). We need to translate this to the SysV ABI before
+calling our C <code>efi_main</code>:
+</p>
+
+<pre><code>.global _efi_entry
+_efi_entry:
+	mov %rcx, %rdi        /* ImageHandle: RCX → RDI */
+	mov %rdx, %rsi        /* SystemTable: RDX → RSI */
+	sub $0x28, %rsp       /* shadow space for efi_main */
+	call efi_main
+	add $0x28, %rsp
+	ret</code></pre>
+
+<p>
+This is the inverse of the efi_call wrappers: UEFI calls us with MS
+ABI, and we translate to SysV ABI for our C code. The linker script
+sets <code>ENTRY(_efi_entry)</code> so the PE header points here.
+</p>
+
+<h2 id="efi-h-changes">Changes to efi.h</h2>
+
+<p>
+With the ABI translation layer, we no longer need
+<code>__attribute__((ms_abi))</code> anywhere in C code. The
+<code>efi.h</code> header changes dramatically:
+</p>
+
+<h3>Before (with EFIAPI)</h3>
+
+<pre><code>#define EFIAPI __attribute__((ms_abi))
+
+typedef EFI_STATUS EFIAPI efi_get_memory_map(UINTN *MemoryMapSize,
+    void *MemoryMap, UINTN *MapKey, UINTN *DescriptorSize,
+    UINT32 *DescriptorVersion);
+
+typedef struct {
+    EFI_TABLE_HEADER Hdr;
+    void *RaiseTPL;
+    void *RestoreTPL;
+    efi_allocate_pages *AllocatePages;
+    efi_free_pages *FreePages;
+    efi_get_memory_map *GetMemoryMap;
+    efi_allocate_pool *AllocatePool;
+    /* ... */
+} EFI_BOOT_SERVICES;</code></pre>
+
+<h3>After (with assembly wrappers)</h3>
+
+<pre><code>/* No EFIAPI macro! */
+
+typedef struct {
+    EFI_TABLE_HEADER Hdr;
+    void *RaiseTPL;
+    void *RestoreTPL;
+    void *AllocatePages;
+    void *FreePages;
+    void *GetMemoryMap;
+    void *AllocatePool;
+    /* ... */
+} EFI_BOOT_SERVICES;</code></pre>
+
+<p>
+Every function pointer in every EFI struct becomes <code>void *</code>.
+We don't need typed function pointers because we never call them
+directly &mdash; we always pass them through the assembly wrappers.
+</p>
+
+<h2 id="efi-main-changes">Changes to efi_main.c</h2>
+
+<p>
+In efi_main.c, every UEFI call changes from a direct function pointer
+call to an <code>efi_callN()</code> wrapper:
+</p>
+
+<h3>Before</h3>
+
+<pre><code>g_ST-&gt;ConOut-&gt;ClearScreen(g_ST-&gt;ConOut);
+g_ST-&gt;ConOut-&gt;OutputString(g_ST-&gt;ConOut, buf);
+g_BS-&gt;SetWatchdogTimer(0, 0, 0, NULL);
+g_BS-&gt;LocateHandle(2, &amp;gop_guid, NULL, &amp;buf_sz, handles);
+g_BS-&gt;GetMemoryMap(&amp;map_size, memory_map, &amp;map_key, &amp;desc_size, &amp;desc_ver);
+g_BS-&gt;AllocatePool(EfiLoaderData, map_size, (void **)&amp;memory_map);
+g_BS-&gt;ExitBootServices(ImageHandle, ebs_map_key);</code></pre>
+
+<h3>After</h3>
+
+<pre><code>efi_call1(g_ST-&gt;ConOut-&gt;ClearScreen, g_ST-&gt;ConOut);
+efi_call2(g_ST-&gt;ConOut-&gt;OutputString, g_ST-&gt;ConOut, buf);
+efi_call4(g_BS-&gt;SetWatchdogTimer, (void *)0, (void *)0, (void *)0, NULL);
+efi_call5(g_BS-&gt;LocateHandle, (void *)2, &amp;gop_guid, NULL, &amp;buf_sz, handles);
+efi_call5(g_BS-&gt;GetMemoryMap, &amp;map_size, memory_map, &amp;map_key, &amp;desc_size, &amp;desc_ver);
+efi_call3(g_BS-&gt;AllocatePool, (void *)EfiLoaderData, (void *)map_size, (void **)&amp;memory_map);
+efi_call2(g_BS-&gt;ExitBootServices, ImageHandle, (void *)ebs_map_key);</code></pre>
+
+<p>
+Note that integer arguments must be cast to <code>void *</code> since
+the wrapper declarations use <code>void *</code> for all parameters.
+This is a minor inconvenience but ensures type-agnosticism in the
+assembly layer.
+</p>
+
+<p>
+Also, <code>efi_main</code> itself no longer needs
+<code>EFIAPI</code>:
+</p>
+
+<pre><code>/* Before: */
+EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
+
+/* After: */
+uint64_t efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)</code></pre>
+
+<p>
+The return type changes to <code>uint64_t</code> (a plain C type)
+since the SysV ABI caller (_efi_entry) will receive the return value
+in rax, which is the same register in both conventions.
+</p>
+
+<h2 id="bugs-we-hit">Bugs We Hit</h2>
+
+<p>
+Building this layer was one of the hardest debugging sessions in the
+entire project. Here are the specific bugs we encountered:
+</p>
+
+<h3>Bug 1: R8/R9 swap in efi_call2 and efi_call3</h3>
+
+<p>
+Our initial efi_call2 put the 2nd argument into R8 (the MS ABI's 3rd
+arg register) instead of leaving it in RDX (where it already was). And
+efi_call3 put the 3rd argument into R9 instead of R8. We had the
+MS ABI register order wrong: <strong>RCX, RDX, R9, R8</strong> instead
+of the correct <strong>RCX, RDX, R8, R9</strong>.
+</p>
+
+<p>
+<em>Symptom</em>: AllocatePool returned EFI_SUCCESS but wrote the
+allocated pointer to the wrong output parameter (because the 3rd arg
+was in R9 instead of R8). Our memory_map pointer stayed NULL, causing
+GetMemoryMap to fail with EFI_INVALID_PARAMETER.
+</p>
+
+<h3>Bug 2: Wrong shadow space size in efi_call5</h3>
+
+<p>
+We initially used <code>sub $0x20</code> without the frame pointer
+push, which put the stack-arg push at the wrong offset relative to
+where the callee expected it. The 5th argument needs to be at
+<code>[callee_rsp + 0x28]</code>, but without accounting for the
+return address push, it ended up 8 bytes off.
+</p>
+
+<h3>Bug 3: Wrong stack-arg offsets in efi_call6</h3>
+
+<p>
+We initially wrote the 5th and 6th arguments to
+<code>0x28(%rsp)</code> and <code>0x30(%rsp)</code> (the callee's
+perspective offsets), but these offsets are from the callee's rsp,
+which is 8 bytes different from the caller's rsp (due to the return
+address push). The correct offsets from the caller's pre-call rsp
+are <code>0x20(%rsp)</code> and <code>0x28(%rsp)</code>.
+</p>
+
+<h3>The debugging approach</h3>
+
+<p>
+The breakthrough came from disassembling GCC's own output for a
+function declared with <code>__attribute__((ms_abi))</code>. GCC's
+codegen for a 5-argument call looked like:
+</p>
+
+<pre><code>mov $0x2,%ecx       /* arg1 → RCX */
+mov %rbx,%rdx       /* arg2 → RDX */
+xor %r8d,%r8d       /* arg3 → R8 */
+mov %rax,%r9        /* arg4 → R9 */
+push %r12           /* arg5 → stack (push, not mov!) */
+sub $0x20,%rsp      /* shadow space */
+call *0xb0(%rax)    /* call */
+add $0x30,%rsp      /* cleanup: 0x20 shadow + 0x8 push + 0x8 alignment */</code></pre>
+
+<p>
+This confirmed: the MS ABI register order is RCX, RDX, R8, R9; stack
+arguments are pushed (not mov'd to offset); and the cleanup accounts
+for shadow space plus pushed args. We adapted our wrappers to match
+this exact pattern.
+</p>
+
+<blockquote class="tip">
+When implementing an ABI translation layer, <strong>disassemble the
+compiler's own code first</strong>. GCC already knows how to do the
+translation correctly when you use <code>__attribute__((ms_abi))</code>.
+Use that as your reference implementation, then replace the attribute
+with your assembly.
+</blockquote>
+
+<div class="nav">
+<a href="15-interrupts.html">&larr; 15. Hardware Interrupts</a>
+<a href="index.html">Table of Contents</a>
+</div>
+
+</body>
+</html>

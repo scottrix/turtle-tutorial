@@ -136,23 +136,32 @@ compiler to port because:
 </p>
 
 <ul>
-<li>It supports <code>__attribute__((ms_abi))</code> (TCC doesn't)</li>
 <li>It targets C11</li>
 <li>It's relatively small (~50K lines of code)</li>
 <li>It's BSD-licensed</li>
+<li>It doesn't need <code>__attribute__((ms_abi))</code> &mdash;
+our ABI translation layer handles the UEFI calling convention in
+assembly, so the C compiler only needs to support the System V ABI</li>
 </ul>
 
 <p>
-PCC currently compiles 5 of our 6 kernel source files (the 6th uses an
-inline assembly constraint that PCC doesn't support). The next steps
-for PCC are:
+With the ABI translation layer in place (see
+<a href="16-abi-translation.html">Chapter 16</a>), the C compiler no
+longer needs any knowledge of the Microsoft x64 calling convention.
+Every UEFI call goes through <code>efi_callN()</code> wrappers in
+<code>efi_call.S</code>. This removes the biggest compiler-specific
+dependency from our codebase.
+</p>
+
+<p>
+The next steps for PCC are:
 </p>
 
 <ul>
-<li>Fix the <code>"Nd"</code> constraint issue</li>
+<li>Fix PCC's inline assembly constraint handling</li>
 <li>Make PCC output Turtle OS object files (ELF, with our ABI)</li>
-<li>Port PCC's runtime support (cpp, assembler linker) to run on
-    Turtle OS</li>
+<li>Port PCC's runtime support (cpp, assembler, linker) to run on
+Turtle OS</li>
 </ul>
 
 <h2>The road ahead</h2>

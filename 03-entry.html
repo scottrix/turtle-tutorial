@@ -19,89 +19,75 @@ entry point with two arguments:
 
 <ul>
 <li><strong>ImageHandle</strong> (in rcx) &mdash; a handle representing our
-    loaded image</li>
+loaded image</li>
 <li><strong>SystemTable</strong> (in rdx) &mdash; a pointer to the
-    EFI_SYSTEM_TABLE</li>
+EFI_SYSTEM_TABLE</li>
 </ul>
 
 <p>
 These arrive via the <strong>Microsoft x64 calling convention</strong>
-(rcx, rdx, r8, r9). But our C code, compiled with GCC, expects the
+(rcx, rdx, r8, r9). But our C code, compiled with GCC or PCC, expects the
 <strong>System V AMD64</strong> convention (rdi, rsi, rdx, rcx). We
 need a bridge.
 </p>
 
-<h2>The entry point: entry.c</h2>
+<h2>The entry point: _efi_entry</h2>
 
 <p>
-Our bridge is deliberately simple. The gnu-efi
-<code>crt0-efi-x86_64.o</code> startup code receives the UEFI call
-(using the MS ABI), then calls our <code>_entry</code> function. Our
-<code>_entry</code> just forwards to <code>efi_main</code>:
+Our bridge is in assembly, in <code>src/boot/efi_call.S</code>. The
+linker script sets <code>ENTRY(_efi_entry)</code>, so the PE header
+points to this function. It receives the UEFI call (MS ABI), translates
+the registers to SysV ABI, and calls our C <code>efi_main</code>:
 </p>
 
-<pre><code>#include &lt;boot/efi.h&gt;
-
-extern EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle,
-                                   EFI_SYSTEM_TABLE *SystemTable);
-
-void _entry(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
-{
-    efi_main(ImageHandle, SystemTable);
-}</code></pre>
+<pre><code>.global _efi_entry
+_efi_entry:
+	mov %rcx, %rdi        /* ImageHandle: RCX → RDI */
+	mov %rdx, %rsi        /* SystemTable: RDX → RSI */
+	sub $0x28, %rsp       /* shadow space for efi_main */
+	call efi_main
+	add $0x28, %rsp
+	ret</code></pre>
 
 <p>
-Wait &mdash; <code>_entry</code> is compiled with the System V ABI
-(because GCC defaults to it), but it's called from the MS-ABI
-<code>crt0</code> startup code. How does this work?
+The gnu-efi <code>crt0-efi-x86_64.o</code> startup code receives the
+initial UEFI call, does some housekeeping (stack setup, relocation), and
+then calls <code>_efi_entry</code> using the MS ABI. Our
+<code>_efi_entry</code> translates to SysV ABI and calls
+<code>efi_main</code>.
 </p>
 
-<p>
-The gnu-efi <code>crt0-efi-x86_64.o</code> does the argument
-shuffling for us. It receives (rcx=ImageHandle, rdx=SystemTable),
-then moves them to (rdi, rsi) before calling our <code>_entry</code>.
-So by the time <code>_entry</code> runs, the arguments are already in
-System V registers.
-</p>
+<h2>Why not just use __attribute__((ms_abi))?</h2>
 
 <p>
-Then <code>_entry</code> calls <code>efi_main</code>, which is declared
-with <code>EFIAPI</code> (= <code>__attribute__((ms_abi))</code>). GCC
-automatically generates the code to shuffle (rdi, rsi) back to (rcx,
-rdx) for that call. The compiler handles all the ABI translation.
-</p>
-
-<h2>Why EFIAPI on efi_main?</h2>
-
-<p>
-You might wonder: if <code>_entry</code> is SYSV ABI, and it calls
-<code>efi_main</code>, why does <code>efi_main</code> need to be
-MS ABI?
+In earlier versions of this project, we used GCC's
+<code>__attribute__((ms_abi))</code> to make <code>efi_main</code>
+use the MS ABI directly. GCC then generated the register shuffling code
+automatically for every UEFI function call. This worked, but it created
+a dependency on a GCC-specific extension.
 </p>
 
 <p>
-Because <code>efi_main</code> calls UEFI boot services
-(<code>g_BS-&gt;GetMemoryMap</code>, etc.), and those function pointers
-expect to be called with the MS ABI. If <code>efi_main</code> itself
-were SYSV ABI, then every time it called a boot service function
-pointer, it would need an explicit assembly shim. By making
-<code>efi_main</code> MS ABI, GCC handles the convention
-automatically for all calls inside it.
+We want our OS to be compilable with PCC (Portable C Compiler), which
+does not support <code>__attribute__((ms_abi))</code>. By moving all
+ABI translation into assembly wrappers (<code>efi_call0</code> through
+<code>efi_call6</code>), no C code needs any compiler-specific ABI
+annotations.
 </p>
 
 <blockquote class="tip">
-In practice, the simplest approach is: make <code>efi_main</code> and
-every function it calls that touches UEFI APIs use
-<code>EFIAPI</code>. Functions that are pure C (no UEFI calls) can
-stay SYSV ABI. Our <code>entry.c</code> bridge is just a
-one-line forwarder.
+The ABI translation layer is covered in detail in
+<a href="16-abi-translation.html">Chapter 16</a>. For now, the key
+idea is: <strong>no C function in our codebase uses
+<code>EFIAPI</code> or <code>__attribute__((ms_abi))</code></strong>.
+All ABI translation happens in <code>efi_call.S</code>.
 </blockquote>
 
 <h2>What about the stack?</h2>
 
 <p>
-UEFI firmware sets up a stack for us before calling the entry point.
-The gnu-efi <code>crt0</code> code allocates an additional 64KB of
+UEFI firmware sets up a stack for us before calling the entry point. The
+gnu-efi <code>crt0</code> code allocates an additional 64KB of
 stack space and aligns it to 16 bytes. We don't need to do anything
 special &mdash; we can use local variables, function calls, and
 recursion normally.
@@ -110,27 +96,32 @@ recursion normally.
 <h2>The flow, visualized</h2>
 
 <pre><code>UEFI firmware
-    |
-    | (MS ABI: rcx=ImageHandle, rdx=SystemTable)
-    v
+  |
+  | (MS ABI: rcx=ImageHandle, rdx=SystemTable)
+  v
 crt0-efi-x86_64.o (gnu-efi startup)
-    |
-    | (shuffles to SYSV ABI: rdi=ImageHandle, rsi=SystemTable)
-    v
-_entry() in entry.c
-    |
-    | (GCC auto-shuffles back to MS ABI: rcx, rdx)
-    v
-efi_main() in efi_main.c    [EFIAPI = __attribute__((ms_abi))]
-    |
-    | (MS ABI function pointers in BootServices)
-    v
+  |
+  | (MS ABI: rcx=ImageHandle, rdx=SystemTable)
+  v
+_efi_entry() in efi_call.S
+  |
+  | (translates to SysV ABI: rdi=ImageHandle, rsi=SystemTable)
+  v
+efi_main() in efi_main.c [plain C, no EFIAPI]
+  |
+  | (calls efi_call2(g_BS->GetMemoryMap, ...) etc.)
+  v
+efi_call5() in efi_call.S
+  |
+  | (translates back to MS ABI: rcx, rdx, r8, r9, stack)
+  v
 UEFI boot services (GetMemoryMap, ExitBootServices, etc.)</code></pre>
 
 <p>
-The key insight: <strong>the compiler does the heavy lifting</strong>.
-We just need the <code>EFIAPI</code> annotation on the right functions,
-and GCC generates all the register shuffling code.
+The key insight: <strong>all ABI translation is in one file</strong>
+(<code>efi_call.S</code>). No C code needs to know about the
+Microsoft calling convention. The compiler can be GCC, PCC, or any
+compiler that supports the System V AMD64 ABI.
 </p>
 
 <div class="nav">

@@ -56,8 +56,10 @@ has three problems in 2025:
 The trade-off is that UEFI uses the <strong>Microsoft x64 calling
 convention</strong> (rcx, rdx, r8, r9 for the first four arguments), not
 the System V AMD64 convention (rdi, rsi, rdx, rcx) that GCC and Linux
-use by default. We will handle this with a single <code>__attribute__((ms_abi))</code>
-annotation &mdash; no assembly shim required for most functions.
+use by default. We handle this with an <strong>assembly ABI translation
+layer</strong> &mdash; small wrapper functions that shuffle registers
+and allocate shadow space. No compiler-specific attributes are needed,
+so our code works with GCC, PCC, or any C compiler.
 </p>
 
 <h2>Why not gnu-efi?</h2>
@@ -127,9 +129,9 @@ references, which need no relocation.
 ├── include/
 │   ├── arch/
 │   │   └── gdt.h          # GDT and TSS structures
-│   ├── boot/
-│   │   └── efi.h          # Our own EFI type definitions
-│   └── kernel/
+│ ├── boot/
+│ │ └── efi.h # Our own EFI type definitions (no EFIAPI)
+│ ├── kernel/
 │       ├── types.h        # Freestanding integer types
 │       ├── kernel.h       # boot_info struct, kernel_main declaration
 │       ├── framebuffer.h  # Framebuffer info struct and API
@@ -137,9 +139,9 @@ references, which need no relocation.
 │       └── string.h       # Freestanding string function declarations
 ├── src/
 │   ├── boot/
-│   │   ├── efi_main.c     # UEFI entry point (the main event)
-│   │   └── entry.c        # SYSV→MS ABI bridge
-│   ├── kernel/
+│ │ ├── efi_main.c # UEFI entry point (the main event)
+│ │ └── efi_call.S # ABI translation layer: SysV↔MS ABI wrappers
+│ ├── kernel/
 │   │   ├── main.c         # kernel_main: serial output, fb init, printk
 │   │   ├── printk.c       # printf for the kernel (uses fb_putc)
 │   │   ├── string.c       # memset, memcpy, strlen, etc.
@@ -187,11 +189,18 @@ We also use compiler-specific attributes:
 </p>
 
 <ul>
-<li><code>__attribute__((ms_abi))</code> &mdash; makes a function use the
-    Windows x64 calling convention (required for all EFI callbacks)</li>
 <li><code>__attribute__((packed))</code> &mdash; removes padding from
-    structs that must match hardware/firmware layouts</li>
+structs that must match hardware/firmware layouts</li>
 </ul>
+
+<p>
+Notably, we do <strong>not</strong> use
+<code>__attribute__((ms_abi))</code> anywhere in our C code. The UEFI
+calling convention is handled entirely by the assembly ABI translation
+layer in <code>efi_call.S</code> (see
+<a href="16-abi-translation.html">Chapter 16</a>). This makes the OS
+compilable with PCC, which lacks the ms_abi extension.
+</p>
 
 <div class="nav">
 <a href="index.html">Table of Contents</a>

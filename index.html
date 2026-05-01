@@ -14,7 +14,8 @@
 <div class="tagline">
 A from-scratch tutorial on booting a freestanding C kernel via UEFI,
 setting up the GDT, driving a framebuffer console, and printing your
-first message &mdash; with no dependencies beyond GCC, GNU ld, and QEMU.
+first message &mdash; with no dependencies beyond GCC (or PCC), GNU ld,
+and QEMU.
 </div>
 </div>
 
@@ -109,6 +110,10 @@ encounter them.
 <li>
 <a href="15-interrupts.html">Hardware Interrupts &mdash; PIC, PIT, and Keyboard</a>
 <span class="desc">PIC remapping, PIT timer at 100 Hz, PS/2 keyboard scancodes, IRQ dispatch</span>
+</li>
+<li>
+<a href="16-abi-translation.html">The ABI Translation Layer</a>
+<span class="desc">Assembly wrappers for System V to Microsoft x64 ABI translation, removing ms_abi dependency</span>
 </li>
 </ol>
 

@@ -57,20 +57,23 @@ System V AMD64 ABI used by Linux, macOS, and most Unix systems:
 
 <p>
 The critical difference: <strong>every function that UEFI calls, or that
-calls a UEFI function, must use the MS ABI</strong>. GCC provides
-<code>__attribute__((ms_abi))</code> for exactly this purpose. We define
-a macro for it:
+calls a UEFI function, must use the MS ABI</strong>. Rather than relying
+on the compiler-specific <code>__attribute__((ms_abi))</code>, we handle
+this with an <strong>assembly translation layer</strong>
+(<code>efi_call.S</code>) that provides <code>efi_call0</code> through
+<code>efi_call6</code> wrappers. These wrappers receive arguments in
+the SysV ABI convention and translate them to the MS ABI before calling
+the UEFI function. This approach is compiler-independent &mdash; it
+works with GCC, PCC, or any C compiler.
 </p>
 
-<pre><code>#define EFIAPI __attribute__((ms_abi))</code></pre>
-
-<blockquote class="warning">
-The <code>EFIAPI</code> macro <strong>must appear at the top of efi.h</strong>,
-before it is used in any typedef. If you put it after the function pointer
-typedefs, the calling convention will be wrong and every UEFI call will
-corrupt its arguments. This is the single most important line in the
-entire boot chain.
-</blockquote>
+<p>
+We cover the ABI translation layer in detail in
+<a href="16-abi-translation.html">Chapter 16</a>. The key point for
+now: <strong>no C code in our project uses
+<code>__attribute__((ms_abi))</code></strong>. All ABI translation
+happens in one assembly file.
+</p>
 
 <h2>Our own type definitions</h2>
 
@@ -289,11 +292,13 @@ don't call, we use <code>void *</code> as a placeholder:
 } EFI_BOOT_SERVICES;</code></pre>
 
 <p>
-We use <code>void *</code> for function pointers we don't call. This
-keeps the struct compact while ensuring every field is at the correct
-offset. The fields we <em>do</em> call have proper typedefs with the
-<code>EFIAPI</code> attribute so the compiler generates the correct
-calling convention.
+We use <code>void *</code> for <strong>every</strong> function pointer
+in every EFI struct. We don't need typed function pointers because we
+never call them directly &mdash; we always pass them through the
+assembly <code>efi_callN()</code> wrappers (see
+<a href="16-abi-translation.html">Chapter 16</a>). This eliminates
+the need for <code>__attribute__((ms_abi))</code> annotations entirely,
+making our code compilable with PCC.
 </p>
 
 <h2>Verifying struct offsets</h2>
