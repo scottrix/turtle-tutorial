@@ -20,9 +20,9 @@ a two-step process: link as ELF, then convert to PE.
 <h2>Compiler flags</h2>
 
 <p>
-We have two sets of flags: one for EFI boot code (compiled as
-position-independent shared library) and one for kernel code (compiled
-as a freestanding large-model binary):
+Every file &mdash; boot code and kernel code alike &mdash; is compiled
+with one set of flags, producing a position-independent freestanding
+binary:
 </p>
 
 <h3>EFI flags</h3>
@@ -49,31 +49,6 @@ as a freestanding large-model binary):
     may not have set up SSE. We avoid all SSE instructions so the
     compiler doesn't generate them.</li>
 </ul>
-
-<h3>Kernel flags</h3>
-
-<pre><code>KERNEL_CFLAGS = -ffreestanding -nostdlib -nostdinc \
-                -fno-pic -fno-pie -fno-stack-protector \
-                -mcmodel=large -mno-red-zone \
-                -mno-mmx -mno-sse -mno-sse2 \
-                -Wall -Wextra -std=c11 -O2 -Iinclude</code></pre>
-
-<ul>
-<li><code>-fno-pic</code> &mdash; kernel code uses absolute addressing
-    (it will run at a known virtual address once we set up page tables)</li>
-<li><code>-mcmodel=large</code> &mdash; allows the kernel to be loaded
-    at any address, including above 2GB. Without this, the compiler
-    assumes all code and data are within the low 2GB.</li>
-</ul>
-
-<blockquote class="warning">
-<strong>entry.c must be compiled with EFI_CFLAGS, not KERNEL_CFLAGS.</strong>
-Our Makefile originally used a pattern rule that matched entry.c with
-KERNEL_CFLAGS. This caused <code>-fno-pic -mcmodel=large</code> to be
-applied, producing absolute R_X86_64_64 relocations. The ELF-to-PE
-conversion can't handle these, and the resulting binary crashed. We
-now have an explicit rule for entry.o that uses EFI_CFLAGS.
-</blockquote>
 
 <h2>The EFI linker script</h2>
 
@@ -218,7 +193,7 @@ Breaking down the QEMU flags:
 
 # This runs the following steps:
 #
-# 1. Compile each .c file with gcc (EFI_CFLAGS or KERNEL_CFLAGS)
+# 1. Compile each .c file with gcc (EFI_CFLAGS)
 # 2. Convert font.bin to font.o with objcopy
 # 3. Link all .o files with ld + crt0-efi + libgnuefi.a
 # 4. Convert turtle.elf to turtle.efi with objcopy

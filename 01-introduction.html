@@ -97,7 +97,6 @@ references, which need no relocation.
 <tr><td>GCC</td><td><code>gcc</code></td><td>C compiler (must target x86_64)</td></tr>
 <tr><td>GNU ld (binutils)</td><td><code>binutils</code></td><td>Linker for ELF and PE conversions</td></tr>
 <tr><td>objcopy</td><td><code>binutils</code></td><td>Convert ELF to PE, embed font as object</td></tr>
-<tr><td>NASM</td><td><code>nasm</code></td><td>Assembler (for legacy entry, optional)</td></tr>
 <tr><td>QEMU</td><td><code>qemu-system-x86</code></td><td>Emulator for testing</td></tr>
 <tr><td>OVMF</td><td><code>edk2-ovmf</code></td><td>Open-source UEFI firmware for QEMU</td></tr>
 <tr><td>mtools</td><td><code>mtools</code></td><td>Create FAT filesystem images</td></tr>
@@ -106,7 +105,7 @@ references, which need no relocation.
 
 <p>On Arch Linux, install everything at once:</p>
 
-<pre><code>sudo pacman -S gcc binutils nasm qemu-system-x86 edk2-ovmf mtools gnu-efi</code></pre>
+<pre><code>sudo pacman -S gcc binutils qemu-system-x86 edk2-ovmf mtools gnu-efi</code></pre>
 
 <h3>Knowledge</h3>
 
@@ -125,7 +124,6 @@ references, which need no relocation.
 <pre><code>turtle/
 ├── Makefile
 ├── efi_linker.ld          # EFI linker script
-├── linker.ld              # Legacy GRUB linker script (not used for UEFI)
 ├── include/
 │   ├── arch/
 │   │   └── gdt.h          # GDT and TSS structures
@@ -147,8 +145,7 @@ references, which need no relocation.
 │   │   ├── string.c       # memset, memcpy, strlen, etc.
 │   │   └── panic.c        # Kernel panic handler
 │   ├── arch/x86_64/
-│   │   ├── gdt.c          # GDT initialization and loading
-│   │   └── entry.asm      # Legacy NASM entry (not used for UEFI)
+│   │   └── gdt.c          # GDT initialization and loading
 │   └── drivers/
 │       ├── fb.c           # Framebuffer console driver
 │       └── font.bin       # 8x16 PC screen font (4096 bytes)
