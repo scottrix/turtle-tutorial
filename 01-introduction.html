@@ -14,9 +14,10 @@
 
 <p>
 We are building <strong>Turtle OS</strong>: a 64-bit operating system for
-x86_64, written entirely in ANSI C (with a handful of inline assembly
-instructions), that boots via UEFI and runs in QEMU. By the end of this
-tutorial you will have:
+x86_64, written entirely in portable ANSI C11 (with the privileged
+instructions in a single assembly file, <code>intrinsics.S</code>), that
+boots via UEFI and runs in QEMU. By the end of this tutorial you will
+have:
 </p>
 
 <ul>
@@ -111,8 +112,9 @@ references, which need no relocation.
 
 <ul>
 <li><strong>ANSI C</strong> &mdash; pointers, structs, bitwise operators, the preprocessor.
-    We use C11 features (<code>__attribute__</code>, designated initializers)
-    but nothing exotic.</li>
+    We use only portable C11 features (<code>_Alignas</code>,
+    <code>#pragma pack</code>, <code><stdarg.h></code>); no
+    GCC-specific extensions.</li>
 <li><strong>x86 assembly basics</strong> &mdash; you should know what registers are,
     what <code>mov</code>, <code>push</code>, <code>call</code>, and <code>ret</code>
     do. You do <em>not</em> need to know 64-bit specifics; we explain those.</li>
@@ -126,7 +128,10 @@ references, which need no relocation.
 ├── efi_linker.ld          # EFI linker script
 ├── include/
 │   ├── arch/
-│   │   └── gdt.h          # GDT and TSS structures
+│   │   ├── gdt.h          # GDT and TSS structures
+│   │   ├── idt.h          # IDT and interrupt-frame structures
+│   │   ├── paging.h       # Page-table structures and paging flags
+│   │   └── intrinsics.h   # Declarations for the intrinsics.S wrappers
 │ ├── boot/
 │ │ └── efi.h # Our own EFI type definitions (no EFIAPI)
 │ ├── kernel/
@@ -145,7 +150,11 @@ references, which need no relocation.
 │   │   ├── string.c       # memset, memcpy, strlen, etc.
 │   │   └── panic.c        # Kernel panic handler
 │   ├── arch/x86_64/
-│   │   └── gdt.c          # GDT initialization and loading
+│   │   ├── gdt.c          # GDT initialization and loading
+│   │   ├── idt.c          # IDT setup and exception dispatch
+│   │   ├── paging.c       # Identity-mapped page tables
+│   │   ├── idt_asm.S      # ISR stubs + idt_set_entry_asm
+│   │   └── intrinsics.S   # C-callable wrappers for privileged instructions
 │   └── drivers/
 │       ├── fb.c           # Framebuffer console driver
 │       └── font.bin       # 8x16 PC screen font (4096 bytes)
@@ -176,19 +185,50 @@ This means:
     entry point is <code>efi_main</code>, called by UEFI firmware</li>
 <li>We must provide our own <code>memset</code>, <code>memcpy</code>,
     <code>strlen</code>, etc.</li>
-<li>We use <code>__builtin_va_list</code> for variadic arguments in
-    <code>printk</code> &mdash; this is a GCC builtin, not a library
-    function</li>
+<li>We use the freestanding header <code><stdarg.h></code> for
+    variadic arguments in <code>printk</code>. C11 requires every
+    freestanding implementation to provide it; GCC and PCC both ship
+    an intrinsic copy that lives in the compiler's private include
+    directory, so <code>-nostdinc</code> does not remove it.</li>
 </ul>
 
 <p>
-We also use compiler-specific attributes:
+We also use a couple of C11 standard facilities in place of the
+compiler-specific extensions you often see in OS tutorials:
 </p>
 
 <ul>
-<li><code>__attribute__((packed))</code> &mdash; removes padding from
-structs that must match hardware/firmware layouts</li>
+<li><code>#pragma pack(push, 1)</code> / <code>#pragma pack(pop)</code>
+    &mdash; removes padding from structs that must match hardware or
+    firmware layouts. This pragma is supported by GCC, Clang, PCC, and
+    MSVC, unlike the <code>__attribute__((packed))</code> GCC extension.</li>
+<li><code>_Alignas(N)</code> &mdash; the C11 standard alignment
+    specifier, used for page tables and the kernel stack. It replaces
+    <code>__attribute__((aligned(N)))</code>.</li>
 </ul>
+
+<p>
+Inline assembly &mdash; things like <code>cli</code>, <code>hlt</code>,
+<code>inb</code>, <code>outb</code>, reading and writing control
+registers &mdash; is inherently compiler-specific. Rather than
+sprinkling <code>__asm__ volatile(...)</code> blocks through the C
+sources, we collect every privileged instruction into a single assembly
+file, <code>src/arch/x86_64/intrinsics.S</code>, exposing plain C
+functions like <code>cpu_cli()</code>, <code>inb(port)</code>, and
+<code>read_cr3()</code>. The C compiler only ever sees normal function
+calls; it never has to know about extended-asm syntax. This is the same
+trick we already use for the UEFI ABI bridge in
+<code>efi_call.S</code>.
+</p>
+
+<p>
+The net result is that <strong>all of our C code is portable ANSI
+C11</strong>. The only compiler-specific knowledge lives in those two
+<code>.S</code> files &mdash; and they only require an x86 assembler,
+not a particular C compiler. We have built and tested with GCC; PCC
+needs only the assembly constraint fixes detailed in
+<a href="16-abi-translation.html">Chapter 16</a>.
+</p>
 
 <p>
 Notably, we do <strong>not</strong> use

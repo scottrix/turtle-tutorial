@@ -177,7 +177,8 @@ three stack pointers (RSP0, RSP1, RSP2) for privilege-level changes,
 seven IST (Interrupt Stack Table) pointers, and an I/O bitmap offset:
 </p>
 
-<pre><code>struct tss_entry {
+<pre><code>#pragma pack(push, 1)
+struct tss_entry {
     uint32_t reserved0;
     uint64_t rsp[3];     /* RSP0, RSP1, RSP2 */
     uint64_t reserved1;
@@ -185,7 +186,8 @@ seven IST (Interrupt Stack Table) pointers, and an I/O bitmap offset:
     uint64_t reserved2;
     uint16_t reserved3;
     uint16_t iomap_base;
-} __attribute__((packed));</code></pre>
+};
+#pragma pack(pop)</code></pre>
 
 <p>
 <code>RSP0</code> is the most important field: when the CPU receives
@@ -263,37 +265,37 @@ This is the most delicate operation. We need to:
 
 <pre><code>void gdt_load(void)
 {
-    __asm__ volatile (
-        "lgdt %0\n\t"           /* load new GDT */
-        "mov $0x10, %%ax\n\t"   /* 0x10 = our data selector */
-        "mov %%ax, %%ds\n\t"
-        "mov %%ax, %%es\n\t"
-        "mov %%ax, %%fs\n\t"
-        "mov %%ax, %%gs\n\t"
-        "mov %%ax, %%ss\n\t"
-        "push $0x08\n\t"        /* 0x08 = our code selector */
-        "lea 1f(%%rip), %%rax\n\t"  /* address after lretq */
-        "push %%rax\n\t"
-        "lretq\n\t"             /* far return: reloads CS */
-        "1:\n\t"
-        "mov $0x28, %%ax\n\t"   /* 0x28 = TSS selector */
-        "ltr %%ax\n\t"
-        :
-        : "m" (gdt_pointer)
-        : "rax"
-    );
+    gdt_load_asm(&gdt_pointer);
 }</code></pre>
 
 <p>
-The <code>lretq</code> trick: we push the new CS selector and the
-address of the next instruction onto the stack, then do a far return.
-This atomically reloads CS and continues execution. It's equivalent to
-a far jump (<code>ljmp</code>), but <code>ljmp</code> with a literal
-address is tricky in 64-bit position-independent code. The
-<code>lea 1f(%rip)</code> computes the address relative to the current
-instruction pointer, which works regardless of where the kernel is
-loaded.
+The actual <code>lgdt</code> + segment reload lives in
+<code>src/arch/x86_64/intrinsics.S</code> as <code>gdt_load_asm</code>.
+Keeping it in assembly means the C compiler never sees the
+position-sensitive <code>lea 1f(%rip)</code> addressing or the
+<code>lretq</code> far-return trick; the C side is just an ordinary
+function call.
 </p>
+
+<p>
+The body of <code>gdt_load_asm</code> does the four steps above:
+</p>
+
+<ol>
+<li><code>lgdt (%rdi)</code> &mdash; load the new GDT (the pointer was
+    passed in <code>rdi</code> per the SysV ABI).</li>
+<li>Reload <code>ds</code>, <code>es</code>, <code>fs</code>,
+    <code>gs</code>, <code>ss</code> with <code>0x10</code> (our data
+    selector).</li>
+<li>Far-jump to <code>0x08</code> using <code>lretq</code>:
+    push the new CS selector, push the address of the next instruction
+    (<code>lea 1f(%rip)</code>), then do a far return. This atomically
+    reloads CS and continues execution. <code>lea 1f(%rip)</code> computes
+    the address relative to the current instruction pointer, which works
+    regardless of where the kernel is loaded.</li>
+<li><code>ltr $0x28</code> &mdash; load the task register with our TSS
+    selector.</li>
+</ol>
 
 <blockquote class="warning">
 <strong>The clobber list must use <code>"rax"</code>, not

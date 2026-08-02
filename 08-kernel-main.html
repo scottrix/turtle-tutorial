@@ -32,22 +32,24 @@ the <code>outb</code> and <code>inb</code> instructions:
 </ul>
 
 <p>
-In GCC inline assembly:
+In our codebase these are not inline-asm snippets scattered through the
+C sources; they live as C-callable functions in
+<code>src/arch/x86_64/intrinsics.S</code>. Calling <code>outb</code>
+from C looks like an ordinary function call:
 </p>
 
 <pre><code>static void serial_out(char c)
 {
-    __asm__ volatile("outb %0, %1"
-                     : : "a"(c), "Nd"((uint16_t)0x3F8));
+    outb((uint8_t)c, 0x3F8);
 }</code></pre>
 
 <p>
-The constraint <code>"a"</code> puts the character in AL (low byte of
-RAX). The constraint <code>"Nd"</code> puts the port number in a
-register or as an immediate (the <code>N</code> modifier means "0..255
-immediate", and <code>d</code> means "any general register"). Since
-0x3F8 fits in 16 bits, the assembler can use the shorter
-<code>outb %al, $0x3F8</code> encoding.
+The <code>outb</code> wrapper takes its arguments in
+<code>dil</code> (the byte) and <code>sil</code> (the port) per the
+SysV ABI, moves them into <code>al</code> and <code>dx</code>, and emits
+<code>out %al, %dx</code>. Keeping the instruction in the assembly file
+means our C code stays portable ANSI C11; only the wrappers need an
+x86 assembler.
 </p>
 
 <h2>Why not memory-mapped I/O?</h2>
@@ -122,8 +124,10 @@ loop is a development convenience.
 
     serial_puts("Kernel initialized.\n");
 
-    for (;;)
-        __asm__ volatile("cli; hlt");
+    for (;;) {
+        cpu_cli();
+        cpu_hlt();
+    }
 }</code></pre>
 
 <p>

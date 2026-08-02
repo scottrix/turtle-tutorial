@@ -155,7 +155,19 @@ Once <code>ExitBootServices</code> returns <code>EFI_SUCCESS</code>:
     there anymore. This is why we <code>cli</code> immediately.</li>
 </ul>
 
-<pre><code>__asm__ volatile("cli");</code></pre>
+<pre><code>cpu_cli();   /* no interrupt can fire until we have our own IDT */</code></pre>
+
+<p>
+<code>cpu_cli()</code> is a C-callable wrapper defined in
+<code>src/arch/x86_64/intrinsics.S</code>. Keeping privileged
+instructions out of the C source means our C code stays portable ANSI
+C11; only the small set of wrapper functions in
+<code>intrinsics.S</code> need an x86 assembler. We will use the same
+approach for <code>hlt</code>, <code>sti</code>, <code>inb</code>,
+<code>outb</code>, the control-register and MSR accesses, and
+<code>lgdt</code>/<code>lidt</code> &mdash; every inline-asm instruction
+in the OS lives in that one file.
+</p>
 
 <p>
 From this point on, we are in bare-metal mode. The next steps are to
