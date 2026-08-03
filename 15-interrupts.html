@@ -295,7 +295,7 @@ pic_eoi((uint8_t)(frame->int_no - 32));
 /* CPU exception - halt */
 cpu_cli();
 for (;;)
-cpu_hlt();
+cpu_halt();
 }
 }
 
@@ -327,7 +327,7 @@ if (keyboard_has_char()) {
 char c = keyboard_get_char();
 serial_out(c);
 }
-cpu_hlt();                 /* sleep until next interrupt */
+cpu_halt();                 /* sleep until next interrupt */
 }</code></pre>
 
 <p>
