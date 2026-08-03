@@ -251,24 +251,28 @@ the stack pointer in <code>TSS.RSP0</code> before calling the IDT
 handler. We must set this to a valid kernel stack:
 </p>
 
-<pre><code>static uint8_t kernel_stack[16384] __attribute__((aligned(16)));
+<pre><code>static _Alignas(16) uint8_t kernel_stack[16384];
 struct tss_entry *tss = gdt_get_tss();
-uint64_t kstack_top = (uint64_t)&amp;kernel_stack[sizeof(kernel_stack)];
-tss-&gt;rsp[0] = kstack_top;
-__asm__ volatile("mov %0, %%rsp" : : "r"(kstack_top));</code></pre>
+uint64_t kstack_top = (uint64_t)&kernel_stack[sizeof(kernel_stack)];
+tss->rsp[0] = kstack_top;
+set_rsp(kstack_top);</code></pre>
 
 <p>
 We point RSP0 to the <em>top</em> of the stack array because x86
 stacks grow downward. We also switch RSP to this kernel stack, since
 after ExitBootServices and the GDT reload, we need a known-good stack
-for interrupt handling.
+for interrupt handling. The 16-byte alignment uses the standard C11
+<code>_Alignas</code> specifier rather than the GCC-specific
+<code>__attribute__((aligned(16)))</code>, and the RSP switch goes
+through the <code>set_rsp</code> wrapper in
+<code>intrinsics.S</code> rather than inline assembly.
 </p>
 
 <h2>Loading the IDT</h2>
 
 <pre><code>idt_init();                    /* fill all 256 entries */
 idt_load();                    /* lidt instruction */
-__asm__ volatile("sti");       /* enable interrupts */</code></pre>
+cpu_sti();                     /* enable interrupts */</code></pre>
 
 <p>
 <code>lidt</code> loads the IDT pointer (limit + base address), just

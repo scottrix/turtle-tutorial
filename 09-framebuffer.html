@@ -184,14 +184,12 @@ reach the right edge, we wrap to the next line (scrolling if needed).
 <h2>printk: formatted output</h2>
 
 <p>
-We implement a minimal <code>printf</code>-like function using GCC's
-built-in variadic argument support:
+We implement a minimal <code>printf</code>-like function using the C11
+freestanding <code><stdarg.h></code> header, which the standard
+requires every freestanding implementation to provide:
 </p>
 
-<pre><code>typedef __builtin_va_list va_list;
-#define va_start(v, l) __builtin_va_start(v, l)
-#define va_end(v)      __builtin_va_end(v)
-#define va_arg(v, t)   __builtin_va_arg(v, t)
+<pre><code>#include <stdarg.h>
 
 int printk(const char *fmt, ...)
 {
@@ -211,6 +209,16 @@ int printk(const char *fmt, ...)
     va_end(ap);
     return count;
 }</code></pre>
+
+<p>
+<code><stdarg.h></code> exposes the standard <code>va_list</code>
+type and the <code>va_start</code> / <code>va_arg</code> /
+<code>va_end</code> macros. GCC and PCC both ship an intrinsic copy
+that lives in the compiler's private include directory, so the
+<code>-nostdinc</code> flag does not remove it. Using the standard
+header keeps <code>printk.c</code> portable ANSI C11 &mdash; no
+<code>__builtin_va_*</code> references leak into our C source.
+</p>
 
 <p>
 We support these format specifiers:

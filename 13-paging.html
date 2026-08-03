@@ -86,14 +86,27 @@ PD tables: 6 tables &times; 4KB = 24KB of page tables.
 
 <pre><code>struct page_table {
     uint64_t entries[512];
-} __attribute__((packed, aligned(4096)));</code></pre>
+};</code></pre>
 
 <p>
-The <code>aligned(4096)</code> attribute is critical: the hardware
-ignores the low 12 bits of the address in a page table entry (those
-bits are flags). If a table is not 4KB-aligned, the hardware will
-interpret the misaligned address bits as flags, causing silent
-corruption.
+The struct itself is just 512 <code>uint64_t</code> entries &mdash;
+no padding can occur, so it needs no packing. Alignment to 4096 bytes
+is critical (the hardware ignores the low 12 bits of a page-table
+address, treating them as flags), but it is a per-<em>variable</em>
+property, not a property of the type. We therefore apply the standard
+C11 <code>_Alignas</code> specifier at each table's definition:
+</p>
+
+<pre><code>static _Alignas(4096) struct page_table pml4;
+static _Alignas(4096) struct page_table pdpt[2];
+static _Alignas(4096) struct page_table pd[2];</code></pre>
+
+<p>
+If a table were not 4KB-aligned, the hardware would interpret the
+misaligned address bits as flags, causing silent corruption.
+<code>_Alignas</code> is the C11 standard spelling of what GCC spells
+<code>__attribute__((aligned(4096)))</code>; portable to any C11
+compiler.
 </p>
 
 <h2>Our mapping strategy</h2>
@@ -189,34 +202,40 @@ We must set several control registers and an MSR:
     uint64_t cr4, efer;
 
     /* Enable PAE (Physical Address Extension) and PSE (Page Size Extension) */
-    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 = read_cr4();
     cr4 |= CR4_PAE | CR4_PSE;
-    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+    write_cr4(cr4);
 
     /* Set EFER.LME (Long Mode Enable) and EFER.NXE (No-Execute Enable) */
-    __asm__ volatile("mov $0xC0000080, %%rcx\n\t"
-                     "rdmsr\n\t"
-                     "shl $32, %%rdx\n\t"
-                     "or %%rdx, %%rax\n\t"
-                     : "=a"(efer) : : "rcx", "rdx");
+    efer = read_msr(0xC0000080);
     efer |= EFER_LME | EFER_NXE;
-    __asm__ volatile("mov $0xC0000080, %%rcx\n\t"
-                     "mov %0, %%rax\n\t"
-                     "mov %%rax, %%rdx\n\t"
-                     "shr $32, %%rdx\n\t"
-                     "wrmsr\n\t"
-                     : : "r"(efer) : "rax", "rcx", "rdx");
+    write_msr(0xC0000080, efer);
 
     /* Load our PML4 address into CR3 */
-    __asm__ volatile("mov %0, %%cr3" : : "r"((uint64_t)&amp;pml4));
+    write_cr3((uint64_t)&pml4);
 
     /* Enable paging (CR0.PG = bit 31) and write-protect (CR0.WP = bit 16) */
     uint64_t cr0;
-    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 = read_cr0();
     cr0 |= CR0_WP;
-    cr0 |= (uint64_t)1 &lt;&lt; 31;
-    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+    cr0 |= (uint64_t)1 << 31;
+    write_cr0(cr0);
 }</code></pre>
+
+<p>
+Each control-register and MSR access goes through a C-callable wrapper
+in <code>src/arch/x86_64/intrinsics.S</code> &mdash;
+<code>read_cr0</code>/<code>write_cr0</code>,
+<code>read_cr3</code>/<code>write_cr3</code>,
+<code>read_cr4</code>/<code>write_cr4</code>, and
+<code>read_msr</code>/<code>write_msr</code>. Keeping the
+<code>mov %%cr4, %0</code> and <code>rdmsr</code>/<code>wrmsr</code>
+sequences in assembly keeps the C source portable ANSI C11: the
+compiler only sees ordinary function calls, never inline-asm.
+<code>read_msr</code> combines the high 32 bits from <code>rdx</code>
+with the low 32 bits from <code>rax</code> into a single 64-bit return
+value; <code>write_msr</code> performs the opposite split.
+</p>
 
 <p>
 Important: we're already in 64-bit long mode (UEFI set that up), so

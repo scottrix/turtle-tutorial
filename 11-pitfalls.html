@@ -114,10 +114,11 @@ reads/writes.
 </p>
 
 <p>
-<strong>Fix:</strong> Use <code>outb</code> with the I/O port:
+<strong>Fix:</strong> Use the <code>outb</code> wrapper from
+<code>intrinsics.S</code> with the I/O port:
 </p>
 
-<pre><code>__asm__ volatile("outb %0, %1" : : "a"(c), "Nd"(0x3F8));</code></pre>
+<pre><code>outb((uint8_t)c, 0x3F8);</code></pre>
 
 <h2>6. GDT granularity: wrong L/D bits</h2>
 
@@ -161,27 +162,7 @@ the buffer before <code>GetMemoryMap</code>, call
 <code>ExitBootServices</code>.
 </p>
 
-<h2>8. entry.c compiled with wrong flags</h2>
-
-<p>
-<strong>Symptom:</strong> Linker errors about R_X86_64_64 relocations
-and DT_TEXTREL.
-</p>
-
-<p>
-<strong>Cause:</strong> The Makefile's pattern rule matched
-<code>entry.c</code> with <code>KERNEL_CFLAGS</code>
-(<code>-fno-pic -mcmodel=large</code>), producing absolute
-relocations. EFI code must be compiled with <code>-fpic -shared</code>.
-</p>
-
-<p>
-<strong>Fix:</strong> Add explicit rules for
-<code>build/boot/entry.o</code> and <code>build/boot/efi_main.o</code>
-that use <code>EFI_CFLAGS</code>.
-</p>
-
-<h2>9. QEMU OVMF on older versions</h2>
+<h2>8. QEMU OVMF on older versions</h2>
 
 <p>
 <strong>Symptom:</strong> QEMU immediately crashes or OVMF fails to

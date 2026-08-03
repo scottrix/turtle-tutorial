@@ -279,9 +279,7 @@ keyboard_init();
 pic_unmask(0);        /* enable IRQ 0 (timer) */
 pic_unmask(1);        /* enable IRQ 1 (keyboard) */
 
-__asm__ volatile("sti");  /* enable CPU interrupts */</code></pre>
-
-<h2>The exception handler with IRQ dispatch</h2>
+cpu_sti();                 /* enable CPU interrupts */</code></pre>
 
 <p>
 Our <code>exception_handler</code> now dispatches hardware IRQs to
@@ -295,8 +293,9 @@ irq_handler((uint8_t)(frame->int_no - 32));
 pic_eoi((uint8_t)(frame->int_no - 32));
 } else if (frame->int_no < 32) {
 /* CPU exception - halt */
+cpu_cli();
 for (;;)
-__asm__ volatile("cli; hlt");
+cpu_hlt();
 }
 }
 
@@ -328,7 +327,7 @@ if (keyboard_has_char()) {
 char c = keyboard_get_char();
 serial_out(c);
 }
-__asm__ volatile("hlt");  /* sleep until next interrupt */
+cpu_hlt();                 /* sleep until next interrupt */
 }</code></pre>
 
 <p>

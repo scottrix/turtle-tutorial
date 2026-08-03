@@ -117,7 +117,7 @@ ld $(EFI_LDFLAGS) -o build/turtle.elf $(EFI_OBJS)</code></pre>
     the gnu-efi relocator needs to fix up</li>
 <li><code>crt0-efi-x86_64.o</code> &mdash; gnu-efi startup code
     (handles the PE entry point, stack allocation, and calling our
-    <code>_entry</code>)</li>
+    <code>_efi_entry</code> in <code>efi_call.S</code>)</li>
 <li><code>libgnuefi.a</code> &mdash; contains
     <code>reloc_x86_64.o</code>, the self-relocator that patches
     <code>.rela</code> entries at runtime</li>
