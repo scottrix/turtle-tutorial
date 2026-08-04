@@ -103,9 +103,7 @@ Key points:
 <h2>Linking</h2>
 
 <pre><code>EFI_LDFLAGS = -nostdlib -z noexecstack -shared -Bsymbolic \
-              -T efi_linker.ld \
-              /usr/lib/crt0-efi-x86_64.o \
-              /usr/lib/libgnuefi.a
+              -T efi_linker.ld
 
 ld $(EFI_LDFLAGS) -o build/turtle.elf $(EFI_OBJS)</code></pre>
 
@@ -113,15 +111,31 @@ ld $(EFI_LDFLAGS) -o build/turtle.elf $(EFI_OBJS)</code></pre>
 <li><code>-shared</code> &mdash; produce a shared library (ET_DYN),
     which is what UEFI expects</li>
 <li><code>-Bsymbolic</code> &mdash; resolve all symbol references
-    within the binary at link time, reducing the number of relocations
-    the gnu-efi relocator needs to fix up</li>
-<li><code>crt0-efi-x86_64.o</code> &mdash; gnu-efi startup code
-    (handles the PE entry point, stack allocation, and calling our
-    <code>_efi_entry</code> in <code>efi_call.S</code>)</li>
-<li><code>libgnuefi.a</code> &mdash; contains
-    <code>reloc_x86_64.o</code>, the self-relocator that patches
-    <code>.rela</code> entries at runtime</li>
+    within the binary at link time. Combined with <code>-fpic</code>,
+    this eliminates every runtime relocation: <code>readelf -r</code>
+    on the resulting <code>turtle.elf</code> reports zero entries in
+    <code>.rela</code>. The UEFI PE loader's <code>.reloc</code>
+    directory then points at the dummy block in
+    <code>efi_pe.S</code> and does no real work.</li>
+<li><code>efi_pe.o</code> &mdash; compiled from
+    <code>src/boot/efi_pe.S</code>, contributes the 12-byte
+    <code>.reloc</code> section (two
+    <code>IMAGE_REL_ABSOLUTE</code> no-op fixups) that the PE loader
+    requires. This replaces gnu-efi's <code>libgnuefi.a</code>
+    relocator.</li>
+<li><code>efi_call.o</code> &mdash; compiled from
+    <code>src/boot/efi_call.S</code>, contains
+    <code>_efi_entry</code>, the actual PE entry point (the
+    <code>ENTRY()</code> directive in <code>efi_linker.ld</code> sets
+    <code>AddressOfEntryPoint</code> to this symbol). This replaces
+    gnu-efi's <code>crt0-efi-x86_64.o</code>.</li>
 </ul>
+
+<p>
+Neither <code>/usr/lib/crt0-efi-x86_64.o</code> nor
+<code>/usr/lib/libgnuefi.a</code> appears on the link line. We link
+only our own objects plus the linker script.
+</p>
 
 <h2>ELF to PE conversion</h2>
 
@@ -195,7 +209,7 @@ Breaking down the QEMU flags:
 #
 # 1. Compile each .c file with gcc (EFI_CFLAGS)
 # 2. Convert font.bin to font.o with objcopy
-# 3. Link all .o files with ld + crt0-efi + libgnuefi.a
+# 3. Link all .o files with ld + efi_linker.ld (no gnu-efi)
 # 4. Convert turtle.elf to turtle.efi with objcopy
 # 5. Create turtle.img (FAT filesystem with BOOTX64.EFI)
 # 6. Copy fresh OVMF_VARS

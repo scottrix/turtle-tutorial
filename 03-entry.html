@@ -50,11 +50,12 @@ _efi_entry:
 	ret</code></pre>
 
 <p>
-The gnu-efi <code>crt0-efi-x86_64.o</code> startup code receives the
-initial UEFI call, does some housekeeping (stack setup, relocation), and
-then calls <code>_efi_entry</code> using the MS ABI. Our
-<code>_efi_entry</code> translates to SysV ABI and calls
-<code>efi_main</code>.
+The UEFI PE loader reads the <code>AddressOfEntryPoint</code> field
+from our PE header and jumps directly to
+<code>_efi_entry</code> using the MS ABI. Our <code>_efi_entry</code>
+translates registers to the SysV ABI and calls <code>efi_main</code>.
+There is no gnu-efi startup file in the chain &mdash; the firmware's PE
+loader is the only thing that runs before our code.
 </p>
 
 <h2>Why not just use __attribute__((ms_abi))?</h2>
@@ -86,21 +87,19 @@ All ABI translation happens in <code>efi_call.S</code>.
 <h2>What about the stack?</h2>
 
 <p>
-UEFI firmware sets up a stack for us before calling the entry point. The
-gnu-efi <code>crt0</code> code allocates an additional 64KB of
-stack space and aligns it to 16 bytes. We don't need to do anything
+UEFI firmware sets up a stack for us before calling the entry point and
+aligns it to 16 bytes per the MS ABI. We don't need to do anything
 special &mdash; we can use local variables, function calls, and
-recursion normally.
+recursion normally. (Later, after <code>ExitBootServices</code>, we
+switch to our own kernel stack; see
+<a href="14-idt.html">Chapter 14</a>.)
 </p>
 
 <h2>The flow, visualized</h2>
 
-<pre><code>UEFI firmware
+<pre><code>UEFI firmware (PE loader)
   |
-  | (MS ABI: rcx=ImageHandle, rdx=SystemTable)
-  v
-crt0-efi-x86_64.o (gnu-efi startup)
-  |
+  | (loads turtle.efi, jumps to AddressOfEntryPoint)
   | (MS ABI: rcx=ImageHandle, rdx=SystemTable)
   v
 _efi_entry() in efi_call.S
@@ -119,9 +118,11 @@ UEFI boot services (GetMemoryMap, ExitBootServices, etc.)</code></pre>
 
 <p>
 The key insight: <strong>all ABI translation is in one file</strong>
-(<code>efi_call.S</code>). No C code needs to know about the
-Microsoft calling convention. The compiler can be GCC, PCC, or any
-compiler that supports the System V AMD64 ABI.
+(<code>efi_call.S</code>). The UEFI PE loader jumps directly to
+<code>_efi_entry</code> &mdash; there is no gnu-efi startup file in
+the chain. No C code needs to know about the Microsoft calling
+convention. The compiler can be GCC, PCC, or any compiler that
+supports the System V AMD64 ABI.
 </p>
 
 <div class="nav">
