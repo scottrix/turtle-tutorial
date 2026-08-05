@@ -51,38 +51,18 @@ _efi_entry:
 
 <p>
 The UEFI PE loader reads the <code>AddressOfEntryPoint</code> field
-from our PE header and jumps directly to
-<code>_efi_entry</code> using the MS ABI. Our <code>_efi_entry</code>
+from our PE header and jumps directly to <code>_efi_entry</code> in
+<code>efi_call.S</code> using the MS ABI. Our <code>_efi_entry</code>
 translates registers to the SysV ABI and calls <code>efi_main</code>.
-There is no gnu-efi startup file in the chain &mdash; the firmware's PE
-loader is the only thing that runs before our code.
+There is no gnu-efi startup file in the chain &mdash; the firmware's
+PE loader is the only thing that runs before our code. The same
+assembly file provides <code>efi_call0</code> through
+<code>efi_call6</code> wrappers for every UEFI boot-services call we
+make, so no C function in the codebase needs
+<code>EFIAPI</code> or <code>__attribute__((ms_abi))</code>. The full
+ABI translation layer is covered in
+<a href="16-abi-translation.html">Chapter 16</a>.
 </p>
-
-<h2>Why not just use __attribute__((ms_abi))?</h2>
-
-<p>
-In earlier versions of this project, we used GCC's
-<code>__attribute__((ms_abi))</code> to make <code>efi_main</code>
-use the MS ABI directly. GCC then generated the register shuffling code
-automatically for every UEFI function call. This worked, but it created
-a dependency on a GCC-specific extension.
-</p>
-
-<p>
-We want our OS to be compilable with PCC (Portable C Compiler), which
-does not support <code>__attribute__((ms_abi))</code>. By moving all
-ABI translation into assembly wrappers (<code>efi_call0</code> through
-<code>efi_call6</code>), no C code needs any compiler-specific ABI
-annotations.
-</p>
-
-<blockquote class="tip">
-The ABI translation layer is covered in detail in
-<a href="16-abi-translation.html">Chapter 16</a>. For now, the key
-idea is: <strong>no C function in our codebase uses
-<code>EFIAPI</code> or <code>__attribute__((ms_abi))</code></strong>.
-All ABI translation happens in <code>efi_call.S</code>.
-</blockquote>
 
 <h2>What about the stack?</h2>
 
