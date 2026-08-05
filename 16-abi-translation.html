@@ -165,12 +165,10 @@ mov %rsi, %rcx  /* a1 → RCX */</code></pre>
 
 <blockquote class="warning">
 <strong>The MS ABI register order is RCX, RDX, R8, R9</strong> &mdash;
-not RCX, RDX, R9, R8 as we initially assumed. This mistake caused
-efi_call3 to put the 3rd argument into R9 (the 4th-argument slot)
-instead of R8 (the 3rd-argument slot). The result: AllocatePool wrote
-the allocated pointer to the wrong location, and our memory_map pointer
-stayed NULL. We spent hours debugging this before realizing the register
-order was wrong.
+not RCX, RDX, R9, R8. Using the wrong order would cause
+<code>efi_call3</code> to put the 3rd argument into R9 (the
+4th-argument slot) instead of R8 (the 3rd-argument slot); the callee
+would then read its 3rd argument from the wrong register.
 </blockquote>
 
 <h2 id="shadow-space">Shadow Space and Stack Alignment</h2>

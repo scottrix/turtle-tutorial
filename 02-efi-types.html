@@ -156,7 +156,7 @@ This is checked with a macro:
 <code>INT32</code> instead, then <code>0x8000000000000005ULL</code>
 gets truncated to <code>0x00000005</code>, which is positive, and
 <code>EFI_ERROR()</code> returns <strong>FALSE</strong> for every
-error code. We spent hours debugging this. Always use <code>INT64</code>.
+error code. Always use <code>INT64</code>.
 </blockquote>
 
 <h2>EFI error codes</h2>
