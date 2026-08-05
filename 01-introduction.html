@@ -119,7 +119,7 @@ required, and we drop a distro-specific dependency.
 <ul>
 <li><strong>ANSI C</strong> &mdash; pointers, structs, bitwise operators, the preprocessor.
     We use only portable C11 features (<code>_Alignas</code>,
-    <code>#pragma pack</code>, <code><stdarg.h></code>); no
+    <code>#pragma pack</code>, <code>&lt;stdarg.h&gt;</code>); no
     GCC-specific extensions.</li>
 <li><strong>x86 assembly basics</strong> &mdash; you should know what registers are,
     what <code>mov</code>, <code>push</code>, <code>call</code>, and <code>ret</code>
@@ -192,7 +192,7 @@ This means:
     entry point is <code>efi_main</code>, called by UEFI firmware</li>
 <li>We must provide our own <code>memset</code>, <code>memcpy</code>,
     <code>strlen</code>, etc.</li>
-<li>We use the freestanding header <code><stdarg.h></code> for
+<li>We use the freestanding header <code>&lt;stdarg.h&gt;</code> for
     variadic arguments in <code>printk</code>. C11 requires every
     freestanding implementation to provide it; GCC and PCC both ship
     an intrinsic copy that lives in the compiler's private include

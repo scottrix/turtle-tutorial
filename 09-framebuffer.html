@@ -185,11 +185,11 @@ reach the right edge, we wrap to the next line (scrolling if needed).
 
 <p>
 We implement a minimal <code>printf</code>-like function using the C11
-freestanding <code><stdarg.h></code> header, which the standard
+freestanding <code>&lt;stdarg.h&gt;</code> header, which the standard
 requires every freestanding implementation to provide:
 </p>
 
-<pre><code>#include <stdarg.h>
+<pre><code>#include &lt;stdarg.h&gt;
 
 int printk(const char *fmt, ...)
 {
@@ -211,7 +211,7 @@ int printk(const char *fmt, ...)
 }</code></pre>
 
 <p>
-<code><stdarg.h></code> exposes the standard <code>va_list</code>
+<code>&lt;stdarg.h&gt;</code> exposes the standard <code>va_list</code>
 type and the <code>va_start</code> / <code>va_arg</code> /
 <code>va_end</code> macros. GCC and PCC both ship an intrinsic copy
 that lives in the compiler's private include directory, so the
