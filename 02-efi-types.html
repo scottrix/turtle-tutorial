@@ -254,12 +254,15 @@ boot services, runtime services, and the configuration table array.
 } EFI_SYSTEM_TABLE;</code></pre>
 
 <blockquote class="warning">
-<strong>The struct layout must match UEFI exactly.</strong> We
-originally omitted five fields (ConsoleInHandle, ConIn, ConsoleOutHandle,
-StdErr, StandardErrorHandle) and had the wrong padding. This pushed
-BootServices from offset 96 to offset 48 &mdash; meaning our
-<code>g_BS</code> pointer was reading garbage. This bug took days to
-find. The UEFI spec lists every field; count the offsets yourself.
+<strong>The struct layout must match UEFI exactly.</strong> Every
+field must be present and in the order the spec defines. Missing
+fields or wrong padding will shift every subsequent field to the wrong
+offset &mdash; for example, omitting <code>ConsoleInHandle</code>,
+<code>ConIn</code>, <code>ConsoleOutHandle</code>,
+<code>StdErr</code>, and <code>StandardErrorHandle</code> pushes
+<code>BootServices</code> from offset 96 to offset 48, and
+<code>g_BS</code> then reads garbage. The UEFI spec lists every
+field; count the offsets yourself.
 </blockquote>
 
 <h2>EFI_BOOT_SERVICES</h2>
