@@ -17,41 +17,18 @@ the resolution, pixel format, and the physical address of the linear
 framebuffer.
 </p>
 
-<h2>The LocateProtocol problem</h2>
+<h2>Getting the GOP interface</h2>
 
 <p>
-The obvious way to get a protocol is <code>LocateProtocol</code>:
-</p>
-
-<pre><code>EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
-EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-status = g_BS-&gt;LocateProtocol(&amp;gop_guid, NULL, (void **)&amp;gop);</code></pre>
-
-<p>
-This should work. In practice, with OVMF (the open-source UEFI firmware
-for QEMU), it returns <code>EFI_INVALID_PARAMETER</code> for
-<strong>every</strong> GUID &mdash; not just GOP. We verified the
-calling convention and GUID bytes in disassembly. The root cause is
-unknown; it may be an OVMF bug or a subtle interaction with the
-relocator.
-</p>
-
-<h2>The workaround: LocateHandle + OpenProtocol</h2>
-
-<p>
-Instead of asking the firmware to find the protocol and return a
-pointer, we can:
-</p>
-
-<ol>
-<li>Call <code>LocateHandle</code> to get a list of all handles that
-    support the GOP GUID</li>
-<li>Call <code>OpenProtocol</code> on each handle to get the protocol
-    interface pointer</li>
-</ol>
-
-<p>
-This two-step approach works perfectly. Here's the implementation:
+To find the framebuffer we use the canonical EDK2 pattern: enumerate
+handles supporting the GOP GUID with <code>LocateHandle</code>, then
+open the protocol interface on the first handle with
+<code>OpenProtocol</code>. This works for any protocol, not just GOP,
+and handles firmware that exposes multiple GOP instances (one per
+display). Every boot-services call goes through an
+<code>efi_callN()</code> wrapper from <code>efi_call.S</code> (see
+Chapter 16) that translates System V ABI arguments into the Microsoft
+x64 ABI the firmware expects.
 </p>
 
 <pre><code>static EFI_STATUS get_gop(EFI_HANDLE ImageHandle,
@@ -62,16 +39,16 @@ This two-step approach works perfectly. Here's the implementation:
     EFI_HANDLE handles[16];
     EFI_STATUS status;
 
-    status = g_BS-&gt;LocateHandle(2, &amp;gop_guid, NULL, &amp;buf_sz, handles);
+    status = efi_call5(g_BS-&gt;LocateHandle, (void *)2, &amp;gop_guid, NULL, &amp;buf_sz, handles);
     if (EFI_ERROR(status))
         return status;
 
     UINTN num = buf_sz / sizeof(EFI_HANDLE);
     for (UINTN h = 0; h &lt; num; h++) {
         void *iface = NULL;
-        status = g_BS-&gt;OpenProtocol(handles[h], &amp;gop_guid,
-                                      &amp;iface, ImageHandle, NULL,
-                                      EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+        status = efi_call6(g_BS-&gt;OpenProtocol, handles[h], &amp;gop_guid,
+                                &amp;iface, ImageHandle, NULL,
+                                (void *)EFI_OPEN_PROTOCOL_GET_PROTOCOL);
         if (!EFI_ERROR(status) &amp;&amp; iface) {
             *gop_out = (EFI_GRAPHICS_OUTPUT_PROTOCOL *)iface;
             return EFI_SUCCESS;

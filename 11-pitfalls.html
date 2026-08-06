@@ -79,25 +79,7 @@ checking is in bit 63, not bit 31.
 
 <pre><code>#define EFI_ERROR(status) (((INT64)(status)) &lt; 0)</code></pre>
 
-<h2>4. LocateProtocol returns INVALID_PARAMETER</h2>
-
-<p>
-<strong>Symptom:</strong> <code>LocateProtocol</code> fails for every
-GUID, not just GOP.
-</p>
-
-<p>
-<strong>Cause:</strong> Unknown. Possibly an OVMF bug. We verified the
-calling convention and GUID bytes in disassembly.
-</p>
-
-<p>
-<strong>Fix:</strong> Use <code>LocateHandle</code> +
-<code>OpenProtocol</code> instead (see Chapter 5). This two-step
-approach works perfectly.
-</p>
-
-<h2>5. Serial MMIO after ExitBootServices</h2>
+<h2>4. Serial MMIO after ExitBootServices</h2>
 
 <p>
 <strong>Symptom:</strong> Writing to <code>0x3F8</code> as a memory
@@ -119,7 +101,7 @@ reads/writes.
 
 <pre><code>outb((uint8_t)c, 0x3F8);</code></pre>
 
-<h2>6. GDT granularity: wrong L/D bits</h2>
+<h2>5. GDT granularity: wrong L/D bits</h2>
 
 <p>
 <strong>Symptom:</strong> Triple fault on <code>lretq</code> after
@@ -139,7 +121,7 @@ compatibility mode and faulted.
 long mode, use <code>0xCF</code> (G=1, D/B=1, L=0, limit=0xF).
 </p>
 
-<h2>7. ExitBootServices map-key invalidation</h2>
+<h2>6. ExitBootServices map-key invalidation</h2>
 
 <p>
 <strong>Symptom:</strong> <code>ExitBootServices</code> returns
@@ -161,7 +143,7 @@ the buffer before <code>GetMemoryMap</code>, call
 <code>ExitBootServices</code>.
 </p>
 
-<h2>8. QEMU OVMF on older versions</h2>
+<h2>7. QEMU OVMF on older versions</h2>
 
 <p>
 <strong>Symptom:</strong> QEMU immediately crashes or OVMF fails to
@@ -179,7 +161,7 @@ Older QEMU versions had bugs with the pflash driver.
 version.
 </p>
 
-<h2>10. UART THR-empty bit in QEMU</h2>
+<h2>8. UART THR-empty bit in QEMU</h2>
 
 <p>
 <strong>Symptom:</strong> Serial output hangs when polling the Line
